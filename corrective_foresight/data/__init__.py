@@ -6,9 +6,15 @@ from corrective_foresight.data.lerobot_adapter import (
     LeRobotTrajectoryAdapter,
     TrajectorySample,
 )
+from corrective_foresight.data.mixer import BalancedLeRobotMixer
+from corrective_foresight.data.stateful_sampler import (
+    StatefulDistributedBatchSampler,
+)
 
 __all__ = [
     "LeRobotTrajectoryAdapter",
+    "BalancedLeRobotMixer",
+    "StatefulDistributedBatchSampler",
     "TrajectoryBatch",
     "TrajectorySample",
     "collate_trajectory_samples",
