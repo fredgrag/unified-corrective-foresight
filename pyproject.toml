@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools==80.10.2", "wheel==0.47.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unified-corrective-foresight"
+version = "0.1.0"
+description = "Causal token-level world-action model for corrective robot control"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "lerobot==0.5.1",
+  "numpy==2.2.6",
+  "PyYAML==6.0.3",
+  "safetensors==0.7.0",
+  "torch==2.8.0",
+  "torchcodec==0.7.0",
+  "torchvision==0.23.0",
+  "transformers==5.3.0",
+]
+
+[project.optional-dependencies]
+sim = ["mani_skill==3.0.1"]
+
+[tool.setuptools.packages.find]
+include = ["corrective_foresight*"]
+

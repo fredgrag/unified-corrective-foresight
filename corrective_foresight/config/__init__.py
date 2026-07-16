@@ -1,0 +1,2 @@
+"""Strict configuration contracts."""
+
