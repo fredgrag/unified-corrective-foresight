@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -145,6 +148,33 @@ def create_recorded_source(root: Path):
 
 class ManiSkillLeRobotConversionIntegrationTest(unittest.TestCase):
     def test_real_rgb_replay_lerobot_v3_round_trip(self) -> None:
+        if os.environ.get("UCF_MANISKILL_CONVERSION_WORKER") != "1":
+            environment = os.environ.copy()
+            environment["UCF_MANISKILL_CONVERSION_WORKER"] = "1"
+            environment["CUDA_VISIBLE_DEVICES"] = "0"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "unittest",
+                    (
+                        "tests.integration.test_maniskill_lerobot_conversion."
+                        "ManiSkillLeRobotConversionIntegrationTest."
+                        "test_real_rgb_replay_lerobot_v3_round_trip"
+                    ),
+                    "-v",
+                ],
+                cwd=Path(__file__).resolve().parents[2],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            output = completed.stdout + completed.stderr
+            self.assertEqual(completed.returncode, 0, output)
+            self.assertNotIn("used fork_rng without explicitly specifying", output)
+            return
+
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
         with tempfile.TemporaryDirectory() as directory:
