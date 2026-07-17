@@ -572,6 +572,8 @@ def _provenance(
             "camera_roles": {"base": "base_camera", "wrist": "hand_camera"},
             "camera_resolution": [128, 128],
             "fps": 20,
+            "streaming_encoding": True,
+            "video_files_size_in_mb": 1,
         },
         "controller_contract": {
             field.name: (
@@ -788,9 +790,10 @@ def convert_to_lerobot_v3(
             root=temporary_root,
             robot_type="panda_wristcam",
             use_videos=True,
-            image_writer_threads=2,
             vcodec="h264",
+            streaming_encoding=True,
         )
+        dataset.meta.update_chunk_settings(video_files_size_in_mb=1)
         total_frames = 0
         for source_episode_id in output_order:
             episode = reader.read_episode(source_episode_id)
