@@ -6,4 +6,4 @@ source_json_sha256: 920fe2fc06c0a5efd879e1735e6b5e3710293fd05af9b52f5caa5e4b9722
 output_root: /mnt/workspace/wwl/corrective-foresight/unified_corrective_foresight/artifacts/datasets/maniskill_pick_cube_v1
 repo_id: local/maniskill_pick_cube_v1
 action_spec: configs/actions/maniskill_panda_pd_ee_delta_pose_physical_v1.yaml
-converter_git_commit: pending
+converter_git_commit: 81209c446db6ce9714a300b6ff37b4dcbb8fdf4a

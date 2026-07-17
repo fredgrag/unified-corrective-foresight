@@ -1,0 +1,59 @@
+schema_version: 1
+spec_id: maniskill.panda.pd_ee_delta_pose.physical.v1
+dimension: 7
+names:
+- ee_delta_x
+- ee_delta_y
+- ee_delta_z
+- ee_rotation_vector_x
+- ee_rotation_vector_y
+- ee_rotation_vector_z
+- gripper_position
+units:
+- m
+- m
+- m
+- rad
+- rad
+- rad
+- m
+action_space: end_effector
+mode: delta
+rotation_representation: axis_angle
+arm_count: 1
+gripper_indices:
+- 6
+control_mode: pd_ee_delta_pose
+frequency_hz: 20.0
+normalization_mean:
+- 0.0008136009068236883
+- 0.0010141260163664368
+- -0.0008604737685305027
+- 0.008540826150604707
+- 0.013409989387938574
+- 0.019080337533660174
+- -0.006727632604824472
+normalization_std:
+- 0.02167497884855324
+- 0.02159315230673568
+- 0.03773022920891818
+- 0.019614077028693156
+- 0.022917612339885395
+- 0.022373158655970338
+- 0.012171111926883573
+minimum:
+- -0.1
+- -0.1
+- -0.1
+- -0.1
+- -0.1
+- -0.1
+- -0.01
+maximum:
+- 0.1
+- 0.1
+- 0.1
+- 0.1
+- 0.1
+- 0.1
+- 0.04
