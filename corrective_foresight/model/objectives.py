@@ -485,64 +485,76 @@ def compute_recursive_dynamics(
     if delta_time.shape != (batch_size, transitions):
         raise ValueError("dynamics delta_time must align with transitions")
 
-    per_horizon_predictions: dict[int, list[Tensor]] = {
-        horizon: [] for horizon in DYNAMICS_HORIZONS
-    }
-    per_horizon_targets: dict[int, list[Tensor]] = {
-        horizon: [] for horizon in DYNAMICS_HORIZONS
-    }
-    per_horizon_valid: dict[int, list[Tensor]] = {
-        horizon: [] for horizon in DYNAMICS_HORIZONS
-    }
-    one_step_states: list[Tensor] = []
-    one_step_deltas: list[Tensor] = []
-    for origin in range(transitions):
-        rollout_length = min(max(DYNAMICS_HORIZONS), transitions - origin)
-        rollout_transition_mask = transition_valid_mask[
-            :, origin : origin + rollout_length
-        ]
-        rollout_action_mask = (
-            rollout_transition_mask[..., None]
-            & action_dimension_mask[:, origin : origin + rollout_length]
-        )
-        safe_initial = torch.where(
-            transition_valid_mask[:, origin, None, None],
-            online_states[:, origin],
-            torch.zeros_like(online_states[:, origin]),
-        )
-        rollout_actions = normalized_actions[:, origin : origin + rollout_length]
-        safe_actions = torch.where(
-            rollout_action_mask, rollout_actions, torch.zeros_like(rollout_actions)
-        )
-        rollout_delta_time = delta_time[:, origin : origin + rollout_length]
-        safe_delta_time = torch.where(
-            rollout_transition_mask,
-            rollout_delta_time,
-            torch.ones_like(rollout_delta_time),
-        )
-        prediction = model.predict_delta(
-            condition_tokens,
-            safe_initial,
-            safe_actions,
-            safe_delta_time,
-            action_spec_ids,
-            start_time=origin,
-        )
-        one_step_states.append(prediction.states[:, 1])
-        one_step_deltas.append(prediction.delta[:, 0])
-        for horizon in DYNAMICS_HORIZONS:
-            if horizon > rollout_length:
-                continue
-            valid_chain = rollout_transition_mask[:, :horizon].all(dim=1)
-            per_horizon_predictions[horizon].append(prediction.states[:, horizon])
-            per_horizon_targets[horizon].append(target_states[:, origin + horizon])
-            per_horizon_valid[horizon].append(valid_chain)
+    rollout_horizon = max(DYNAMICS_HORIZONS)
+    origin_ids = torch.arange(transitions, device=online_states.device)
+    rollout_offsets = torch.arange(rollout_horizon, device=online_states.device)
+    transition_indices = origin_ids[:, None] + rollout_offsets[None]
+    within_sequence = transition_indices < transitions
+    safe_indices = transition_indices.clamp(max=transitions - 1)
+    rollout_transition_mask = (
+        transition_valid_mask[:, safe_indices] & within_sequence[None]
+    )
+    rollout_action_mask = (
+        rollout_transition_mask[..., None]
+        & action_dimension_mask[:, safe_indices]
+    )
+    rollout_actions = normalized_actions[:, safe_indices]
+    safe_actions = torch.where(
+        rollout_action_mask, rollout_actions, torch.zeros_like(rollout_actions)
+    )
+    rollout_delta_time = delta_time[:, safe_indices]
+    safe_delta_time = torch.where(
+        rollout_transition_mask,
+        rollout_delta_time,
+        torch.ones_like(rollout_delta_time),
+    )
+    safe_initial = torch.where(
+        transition_valid_mask[..., None, None],
+        online_states[:, :-1],
+        torch.zeros_like(online_states[:, :-1]),
+    )
+    flattened_batch = batch_size * transitions
+    repeated_conditions = condition_tokens[:, None].expand(
+        batch_size,
+        transitions,
+        *condition_tokens.shape[1:],
+    ).reshape(flattened_batch, *condition_tokens.shape[1:])
+    repeated_action_spec_ids = tuple(
+        spec_id for spec_id in action_spec_ids for _ in range(transitions)
+    )
+    prediction = model.predict_delta(
+        repeated_conditions,
+        safe_initial.reshape(flattened_batch, state_tokens, hidden_size),
+        safe_actions.reshape(
+            flattened_batch,
+            rollout_horizon,
+            normalized_actions.shape[-1],
+        ),
+        safe_delta_time.reshape(flattened_batch, rollout_horizon),
+        repeated_action_spec_ids,
+        start_time=origin_ids[None].expand(batch_size, -1).reshape(-1),
+    )
+    rollout_states = prediction.states.reshape(
+        batch_size,
+        transitions,
+        rollout_horizon + 1,
+        state_tokens,
+        hidden_size,
+    )
+    rollout_deltas = prediction.delta.reshape(
+        batch_size,
+        transitions,
+        rollout_horizon,
+        state_tokens,
+        hidden_size,
+    )
 
     horizon_losses: dict[int, Tensor] = {}
     for horizon in DYNAMICS_HORIZONS:
-        predicted = torch.stack(per_horizon_predictions[horizon], dim=1)
-        target = torch.stack(per_horizon_targets[horizon], dim=1)
-        valid = torch.stack(per_horizon_valid[horizon], dim=1)
+        valid = horizon_chain_mask(transition_valid_mask, horizon)
+        origin_count = transitions - horizon + 1
+        predicted = rollout_states[:, :origin_count, horizon]
+        target = target_states[:, horizon:]
         feature_mask = valid[..., None, None].expand(
             -1, -1, state_tokens, hidden_size
         )
@@ -555,8 +567,8 @@ def compute_recursive_dynamics(
     return DynamicsComputation(
         loss=combine_horizon_losses(horizon_losses),
         horizon_losses=MappingProxyType(horizon_losses),
-        one_step_predicted_states=torch.stack(one_step_states, dim=1),
-        one_step_predicted_deltas=torch.stack(one_step_deltas, dim=1),
+        one_step_predicted_states=rollout_states[:, :, 1],
+        one_step_predicted_deltas=rollout_deltas[:, :, 0],
         one_step_valid_mask=transition_valid_mask,
     )
 

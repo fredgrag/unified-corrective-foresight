@@ -139,7 +139,7 @@ class WorldActionTransformer(nn.Module):
         delta_time: Tensor,
         action_spec_ids: Sequence[str],
         *,
-        start_time: int = 0,
+        start_time: int | Tensor = 0,
     ) -> DeltaPrediction:
         batch_size = self._validate_conditions(condition_tokens, action_spec_ids)
         self._validate_state(initial_state, batch_size, dimensions=3)
@@ -150,8 +150,27 @@ class WorldActionTransformer(nn.Module):
             raise ValueError("action batch must match conditions")
         if normalized_actions.shape[1] == 0:
             raise ValueError("dynamics rollout requires at least one transition")
-        if type(start_time) is not int or start_time < 0:
-            raise ValueError("start_time must be a nonnegative integer")
+        if type(start_time) is int:
+            if start_time < 0:
+                raise ValueError("start_time must be nonnegative")
+            start_offsets = torch.full(
+                (batch_size,),
+                start_time,
+                dtype=torch.long,
+                device=condition_tokens.device,
+            )
+        elif (
+            isinstance(start_time, Tensor)
+            and start_time.dtype is torch.long
+            and start_time.device == condition_tokens.device
+            and start_time.shape == (batch_size,)
+            and not (start_time < 0).any().item()
+        ):
+            start_offsets = start_time
+        else:
+            raise ValueError(
+                "start_time must be a nonnegative integer or int64 tensor [B]"
+            )
         if delta_time.dtype not in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
             raise ValueError("delta_time must be floating point")
         if not torch.isfinite(delta_time).all().item() or (delta_time <= 0).any().item():
@@ -172,9 +191,11 @@ class WorldActionTransformer(nn.Module):
                 current_state,
                 action_token,
                 delta_queries,
-                semantic_time=start_time + step,
+                semantic_time=step,
             )
-            hidden = self.transformer(self._embed_view(view))
+            hidden = self.transformer(
+                self._embed_view(view, time_offsets=start_offsets)
+            )
             query_indices = view.indices(TokenRole.DELTA_QUERY)
             predicted_delta = self.delta_projection(hidden[:, query_indices])
             predicted_deltas.append(predicted_delta)

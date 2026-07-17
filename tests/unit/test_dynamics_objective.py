@@ -17,7 +17,8 @@ from corrective_foresight.model.objectives import (
 class RecordingZeroDynamicsModel:
     def __init__(self) -> None:
         self.rollout_lengths: list[int] = []
-        self.start_times: list[int] = []
+        self.batch_sizes: list[int] = []
+        self.start_times: list[tuple[int, ...]] = []
 
     def predict_delta(
         self,
@@ -32,7 +33,8 @@ class RecordingZeroDynamicsModel:
         del condition_tokens, delta_time, action_spec_ids
         rollout_length = normalized_actions.shape[1]
         self.rollout_lengths.append(rollout_length)
-        self.start_times.append(start_time)
+        self.batch_sizes.append(normalized_actions.shape[0])
+        self.start_times.append(tuple(torch.as_tensor(start_time).tolist()))
         delta = initial_state.new_zeros(
             initial_state.shape[0],
             rollout_length,
@@ -95,8 +97,9 @@ class DynamicsObjectiveTest(unittest.TestCase):
             action_spec_ids=("test",),
         )
 
-        self.assertEqual(model.rollout_lengths, [8, 7, 6, 5, 4, 3, 2, 1])
-        self.assertEqual(model.start_times, list(range(8)))
+        self.assertEqual(model.rollout_lengths, [8])
+        self.assertEqual(model.batch_sizes, [8])
+        self.assertEqual(model.start_times, [tuple(range(8))])
         self.assertEqual(set(computation.horizon_losses), set(DYNAMICS_HORIZONS))
         self.assertEqual(computation.one_step_predicted_states.shape, (1, 8, 9, 4))
         self.assertEqual(computation.one_step_predicted_deltas.shape, (1, 8, 9, 4))

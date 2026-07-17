@@ -18,8 +18,8 @@ class EMAStateTarget(nn.Module):
         if not 0.0 <= tau < 1.0:
             raise ValueError("EMA tau must satisfy 0 <= tau < 1")
         object.__setattr__(self, "_online", online)
+        object.__setattr__(self, "_backbone", online.backbone)
         self.tau = float(tau)
-        self.backbone = online.backbone
         self.adapter: StateAdapter = deepcopy(online.adapter)
         self.adapter.requires_grad_(False)
         self.train(False)
@@ -27,6 +27,10 @@ class EMAStateTarget(nn.Module):
     @property
     def online(self) -> OnlineStateEncoder:
         return object.__getattribute__(self, "_online")
+
+    @property
+    def backbone(self) -> nn.Module:
+        return object.__getattribute__(self, "_backbone")
 
     def train(self, mode: bool = True) -> EMAStateTarget:
         super().train(False)

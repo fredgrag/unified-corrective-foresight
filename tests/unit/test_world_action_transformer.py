@@ -179,6 +179,31 @@ class WorldActionTransformerTest(unittest.TestCase):
 
         self.assertGreater((first.delta - second.delta).abs().max().item(), 1e-6)
 
+    def test_dynamics_accepts_per_sample_start_times(self) -> None:
+        self.model.eval()
+        initial_state = torch.randn(2, 9, 12)
+        actions = torch.randn(2, 1, 2)
+
+        prediction = self.model.predict_delta(
+            self.condition,
+            initial_state,
+            actions,
+            torch.full((2, 1), 0.1),
+            self.spec_ids,
+            start_time=torch.tensor([0, 3]),
+        )
+
+        self.assertEqual(prediction.delta.shape, (2, 1, 9, 12))
+        with self.assertRaisesRegex(ValueError, "start_time"):
+            self.model.predict_delta(
+                self.condition,
+                initial_state,
+                actions,
+                torch.full((2, 1), 0.1),
+                self.spec_ids,
+                start_time=torch.tensor([0, -1]),
+            )
+
     def test_inverse_and_cycle_share_one_delta_layernorm(self) -> None:
         calls: list[torch.Tensor] = []
         handle = self.model.delta_norm.register_forward_hook(
