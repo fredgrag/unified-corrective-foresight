@@ -1,0 +1,9 @@
+schema_version: 1
+source_h5: /root/.maniskill/demos/PickCube-v1/rl/trajectory.none.pd_ee_delta_pose.physx_cuda.h5
+source_json: /root/.maniskill/demos/PickCube-v1/rl/trajectory.none.pd_ee_delta_pose.physx_cuda.json
+source_h5_sha256: 5a560b8b73d4b2446cbb49f0dcb470b6a00f35236bc660da9a6e519dadbf6530
+source_json_sha256: 920fe2fc06c0a5efd879e1735e6b5e3710293fd05af9b52f5caa5e4b97226d5a
+output_root: /mnt/workspace/wwl/corrective-foresight/unified_corrective_foresight/artifacts/datasets/maniskill_pick_cube_v1
+repo_id: local/maniskill_pick_cube_v1
+action_spec: configs/actions/maniskill_panda_pd_ee_delta_pose_physical_v1.yaml
+converter_git_commit: pending

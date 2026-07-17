@@ -35,12 +35,9 @@ def _camera_frame(episode: int, frame: int, wrist: bool) -> np.ndarray:
     return image
 
 
-def _flatten_stat(stats: dict, name: str) -> tuple[float, ...]:
-    return tuple(float(value) for value in np.asarray(stats[name]).reshape(-1))
-
-
 def create_lerobot_v3_fixture(root: Path) -> tuple[DatasetSpec, ActionSpec]:
     import av
+    from lerobot.datasets.io_utils import write_info
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     av.logging.set_level(av.logging.ERROR)
@@ -87,8 +84,26 @@ def create_lerobot_v3_fixture(root: Path) -> tuple[DatasetSpec, ActionSpec]:
         dataset.save_episode(parallel_encoding=False)
     dataset.finalize()
 
+    training_actions = np.stack(
+        [
+            np.asarray([frame / 20.0, -frame / 30.0], dtype=np.float32)
+            for frame in range(EPISODE_LENGTH)
+        ]
+    )
+    training_mean = training_actions.mean(axis=0)
+    training_std = training_actions.std(axis=0)
+    dataset.meta.info["ucf"] = {
+        "schema_version": 1,
+        "train_action_stats": {
+            "feature": "action",
+            "mean": training_mean.tolist(),
+            "std": training_std.tolist(),
+            "count": int(training_actions.shape[0]),
+        },
+    }
+    write_info(dataset.meta.info, dataset.meta.root)
+
     reopened = LeRobotDataset(repo_id=REPO_ID, root=root, video_backend="torchcodec")
-    action_stats = reopened.meta.stats["action"]
     action_spec = ActionSpec(
         schema_version=1,
         spec_id="fixture.ee_delta.v1",
@@ -102,8 +117,8 @@ def create_lerobot_v3_fixture(root: Path) -> tuple[DatasetSpec, ActionSpec]:
         gripper_indices=(1,),
         control_mode="fixture_delta",
         frequency_hz=float(FPS),
-        normalization_mean=_flatten_stat(action_stats, "mean"),
-        normalization_std=_flatten_stat(action_stats, "std"),
+        normalization_mean=tuple(float(value) for value in training_mean),
+        normalization_std=tuple(float(value) for value in training_std),
         minimum=(-1.0, -1.0),
         maximum=(1.0, 1.0),
     )

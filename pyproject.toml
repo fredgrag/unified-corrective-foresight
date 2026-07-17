@@ -20,8 +20,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-sim = ["mani_skill==3.0.1"]
+sim = ["h5py==3.16.0", "mani_skill==3.0.1"]
 
 [tool.setuptools.packages.find]
 include = ["corrective_foresight*"]
-

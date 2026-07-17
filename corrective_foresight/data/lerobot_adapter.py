@@ -354,9 +354,17 @@ class LeRobotTrajectoryAdapter:
                 f"missing language feature: {self.dataset_spec.language_feature}"
             )
 
-        action_stats = dataset.meta.stats.get(action_key)
-        if action_stats is None:
-            raise ValueError(f"missing normalization statistics for {action_key}")
+        ucf_metadata = dataset.meta.info.get("ucf")
+        if not isinstance(ucf_metadata, Mapping):
+            raise ValueError("missing UCF training-split normalization metadata")
+        action_stats = ucf_metadata.get("train_action_stats")
+        if not isinstance(action_stats, Mapping):
+            raise ValueError("missing UCF train_action_stats metadata")
+        if action_stats.get("feature") != action_key:
+            raise ValueError("UCF train_action_stats feature does not match ActionSpec")
+        count = action_stats.get("count")
+        if not isinstance(count, int) or count <= 0:
+            raise ValueError("UCF train_action_stats count must be positive")
         for stat_name, expected in (
             ("mean", self.action_spec.normalization_mean),
             ("std", self.action_spec.normalization_std),
@@ -369,7 +377,8 @@ class LeRobotTrajectoryAdapter:
                 actual, expected_tensor, atol=1e-6, rtol=1e-6
             ):
                 raise ValueError(
-                    f"ActionSpec normalization_{stat_name} does not match dataset stats"
+                    f"ActionSpec normalization_{stat_name} does not match "
+                    "training-split stats"
                 )
 
         available_episodes = extract_episode_ids(dataset.meta.episodes)
