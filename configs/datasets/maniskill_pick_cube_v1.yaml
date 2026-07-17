@@ -2,7 +2,7 @@ schema_version: 1
 dataset_id: maniskill.pick_cube.panda_wristcam.v1
 repo_id: null
 local_root: /mnt/workspace/wwl/corrective-foresight/unified_corrective_foresight/artifacts/datasets/maniskill_pick_cube_v1
-revision: 7618c8157c10aa46cd60a324efc5d5d61a08d2608ce12e8d07544538428e2b5d
+revision: ed8046be8099657de11fef325c4ec87c8d6311eec4f373c72dd501fc34e1420b
 fps: 20.0
 camera_features:
   base: observation.images.base
