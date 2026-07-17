@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "canonical": {
+    "provider": "huggingface",
+    "model_id": "facebook/dinov3-vitb16-pretrain-lvd1689m",
+    "revision": "5931719e67bbdb9737e363e781fb0c67687896bc"
+  },
+  "source": {
+    "provider": "modelscope",
+    "model_id": "facebook/dinov3-vitb16-pretrain-lvd1689m",
+    "revision": "23d0280ae6ee4ced592a3459674ad027d3c18906"
+  },
+  "files": {
+    "LICENSE.md": {
+      "size": 7503,
+      "sha256": "25d122eb8f5b880fd23c736fb6ea8018ee45c12237e00b8a86d14c653904999e"
+    },
+    "config.json": {
+      "size": 744,
+      "sha256": "3c9cc418f4622fd6d5587fd142b6f3cba0ba6a69f67ced907d8b7f26118451ec"
+    },
+    "model.safetensors": {
+      "size": 342662192,
+      "sha256": "9a21ac3df0c63839d62612dda6f454d816c25611cc7a52966ed5a5a94921dc8b"
+    },
+    "preprocessor_config.json": {
+      "size": 585,
+      "sha256": "960c41d1f3a7778b936365769a2d90550b318a6c0a53a0296957adacfe5e0dd7"
+    }
+  }
+}
