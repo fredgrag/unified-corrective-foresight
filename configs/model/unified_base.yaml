@@ -1,0 +1,13 @@
+hidden_size: 768
+num_layers: 12
+num_attention_heads: 12
+mlp_ratio: 4
+dropout: 0.1
+state_tokens: 9
+action_horizon: 8
+max_time_steps: 64
+time_fourier_bands: 16
+gradient_checkpointing: true
+precision: bf16
+cycle_noise_std: 0.01
+cycle_dropout: 0.05

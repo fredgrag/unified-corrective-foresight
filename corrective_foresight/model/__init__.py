@@ -17,6 +17,12 @@ from corrective_foresight.model.flow import (
     sample_flow_training,
     sample_rectified_flow,
 )
+from corrective_foresight.model.outputs import (
+    CyclePrediction,
+    DeltaPrediction,
+    InversePrediction,
+    PolicyVelocityPrediction,
+)
 from corrective_foresight.model.spatial_resampler import AnchoredSpatialResampler
 from corrective_foresight.model.state_encoder import OnlineStateEncoder, StateAdapter
 from corrective_foresight.model.token_types import TokenMetadata, TokenRole, TokenView
@@ -27,24 +33,34 @@ from corrective_foresight.model.token_views import (
     build_policy_view,
 )
 from corrective_foresight.model.transformer import CausalTokenTransformer
+from corrective_foresight.model.world_action_transformer import (
+    WorldActionConfig,
+    WorldActionTransformer,
+)
 
 __all__ = [
     "ActionAdapter",
     "ActionAdapterRegistry",
     "AnchoredSpatialResampler",
+    "CausalTokenTransformer",
+    "CyclePrediction",
     "DINOV3_MODEL_ID",
     "DINOV3_MODEL_REVISION",
     "DinoV3PatchBackbone",
+    "DeltaPrediction",
     "EMAStateTarget",
     "FlowTrainingSample",
     "IntegrationReport",
+    "InversePrediction",
     "OnlineStateEncoder",
     "PatchGrid",
+    "PolicyVelocityPrediction",
     "StateAdapter",
     "TokenMetadata",
     "TokenRole",
     "TokenView",
-    "CausalTokenTransformer",
+    "WorldActionConfig",
+    "WorldActionTransformer",
     "build_cycle_view",
     "build_forward_view",
     "build_inverse_view",

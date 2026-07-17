@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 from torch import Tensor, nn
+from torch.utils.checkpoint import checkpoint
 
 from corrective_foresight.model.attention_contract import compile_attention_mask
 from corrective_foresight.model.token_types import TokenView
@@ -15,6 +16,7 @@ class CausalTokenTransformer(nn.Module):
         num_attention_heads: int,
         mlp_ratio: int = 4,
         dropout: float = 0.0,
+        gradient_checkpointing: bool = False,
     ) -> None:
         super().__init__()
         if min(hidden_size, num_layers, num_attention_heads, mlp_ratio) <= 0:
@@ -24,6 +26,7 @@ class CausalTokenTransformer(nn.Module):
         if not 0.0 <= dropout < 1.0:
             raise ValueError("dropout must satisfy 0 <= dropout < 1")
         self.hidden_size = hidden_size
+        self.gradient_checkpointing = gradient_checkpointing
         self.layers = nn.ModuleList(
             _CausalTransformerLayer(
                 hidden_size=hidden_size,
@@ -50,7 +53,16 @@ class CausalTokenTransformer(nn.Module):
             view.tokens,
         )
         for layer in self.layers:
-            hidden = layer(hidden, attention_mask, key_padding_mask)
+            if self.gradient_checkpointing and self.training and torch.is_grad_enabled():
+                hidden = checkpoint(
+                    layer,
+                    hidden,
+                    attention_mask,
+                    key_padding_mask,
+                    use_reentrant=False,
+                )
+            else:
+                hidden = layer(hidden, attention_mask, key_padding_mask)
             hidden = hidden.masked_fill(key_padding_mask[..., None], 0.0)
         hidden = self.output_norm(hidden)
         return hidden.masked_fill(key_padding_mask[..., None], 0.0)
