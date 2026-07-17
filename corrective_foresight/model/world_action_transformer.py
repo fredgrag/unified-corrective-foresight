@@ -138,6 +138,8 @@ class WorldActionTransformer(nn.Module):
         normalized_actions: Tensor,
         delta_time: Tensor,
         action_spec_ids: Sequence[str],
+        *,
+        start_time: int = 0,
     ) -> DeltaPrediction:
         batch_size = self._validate_conditions(condition_tokens, action_spec_ids)
         self._validate_state(initial_state, batch_size, dimensions=3)
@@ -148,6 +150,8 @@ class WorldActionTransformer(nn.Module):
             raise ValueError("action batch must match conditions")
         if normalized_actions.shape[1] == 0:
             raise ValueError("dynamics rollout requires at least one transition")
+        if type(start_time) is not int or start_time < 0:
+            raise ValueError("start_time must be a nonnegative integer")
         if delta_time.dtype not in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
             raise ValueError("delta_time must be floating point")
         if not torch.isfinite(delta_time).all().item() or (delta_time <= 0).any().item():
@@ -168,7 +172,7 @@ class WorldActionTransformer(nn.Module):
                 current_state,
                 action_token,
                 delta_queries,
-                semantic_time=step,
+                semantic_time=start_time + step,
             )
             hidden = self.transformer(self._embed_view(view))
             query_indices = view.indices(TokenRole.DELTA_QUERY)
@@ -227,6 +231,8 @@ class WorldActionTransformer(nn.Module):
         noisy_flow_actions: Tensor,
         flow_time: Tensor,
         action_spec_ids: Sequence[str],
+        *,
+        observed_state_valid_mask: Tensor | None = None,
     ) -> PolicyVelocityPrediction:
         batch_size = self._validate_conditions(condition_tokens, action_spec_ids)
         self._validate_state(observed_states, batch_size, dimensions=4)
@@ -248,12 +254,26 @@ class WorldActionTransformer(nn.Module):
         horizon_tokens = self.policy_horizon_embedding(horizon_ids)[None].expand(
             batch_size, -1, -1
         )
+        observed_state_valid = None
+        if observed_state_valid_mask is not None:
+            if (
+                observed_state_valid_mask.dtype is not torch.bool
+                or observed_state_valid_mask.device != observed_states.device
+                or observed_state_valid_mask.shape != observed_states.shape[:2]
+            ):
+                raise ValueError(
+                    "observed_state_valid_mask must be bool with shape [B,T]"
+                )
+            observed_state_valid = observed_state_valid_mask[..., None].expand(
+                *observed_states.shape[:3]
+            )
         view = build_policy_view(
             condition_tokens,
             observed_states,
             flow_state_tokens,
             time_tokens,
             horizon_tokens,
+            observed_state_valid=observed_state_valid,
         )
         hidden = self.transformer(self._embed_view(view))
         query_indices = view.indices(TokenRole.POLICY_QUERY)

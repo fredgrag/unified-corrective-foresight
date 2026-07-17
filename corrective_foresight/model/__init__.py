@@ -23,6 +23,14 @@ from corrective_foresight.model.outputs import (
     InversePrediction,
     PolicyVelocityPrediction,
 )
+from corrective_foresight.model.objectives import (
+    DEFAULT_OPTIMIZED_TERMS,
+    REQUIRED_METRICS,
+    CorrectiveForesightObjective,
+    ObjectiveConfig,
+    ObjectiveInputs,
+    ObjectiveResult,
+)
 from corrective_foresight.model.spatial_resampler import AnchoredSpatialResampler
 from corrective_foresight.model.state_encoder import OnlineStateEncoder, StateAdapter
 from corrective_foresight.model.token_types import TokenMetadata, TokenRole, TokenView
@@ -43,9 +51,11 @@ __all__ = [
     "ActionAdapterRegistry",
     "AnchoredSpatialResampler",
     "CausalTokenTransformer",
+    "CorrectiveForesightObjective",
     "CyclePrediction",
     "DINOV3_MODEL_ID",
     "DINOV3_MODEL_REVISION",
+    "DEFAULT_OPTIMIZED_TERMS",
     "DinoV3PatchBackbone",
     "DeltaPrediction",
     "EMAStateTarget",
@@ -53,8 +63,12 @@ __all__ = [
     "IntegrationReport",
     "InversePrediction",
     "OnlineStateEncoder",
+    "ObjectiveConfig",
+    "ObjectiveInputs",
+    "ObjectiveResult",
     "PatchGrid",
     "PolicyVelocityPrediction",
+    "REQUIRED_METRICS",
     "StateAdapter",
     "TokenMetadata",
     "TokenRole",

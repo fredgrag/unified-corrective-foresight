@@ -109,6 +109,30 @@ class WorldActionTransformerTest(unittest.TestCase):
 
         self.assertEqual(prediction.velocity.shape, (2, 8, 2))
 
+    def test_policy_observation_mask_becomes_state_key_padding(self) -> None:
+        observed_states = torch.randn(2, 2, 9, 12)
+        observed_valid = torch.tensor([[False, True], [True, True]])
+        captured = []
+        handle = self.model.transformer.register_forward_pre_hook(
+            lambda module, inputs: captured.append(inputs[0])
+        )
+        try:
+            self.model.predict_policy_velocity(
+                self.condition,
+                observed_states,
+                torch.randn(2, 8, 2),
+                torch.rand(2, 1, 1),
+                self.spec_ids,
+                observed_state_valid_mask=observed_valid,
+            )
+        finally:
+            handle.remove()
+
+        view = captured[0]
+        state_indices = view.indices(TokenRole.STATE)
+        self.assertTrue(view.key_padding_mask[0, state_indices[:9]].all().item())
+        self.assertFalse(view.key_padding_mask[0, state_indices[9:]].any().item())
+
     def test_delta_time_fourier_embedding_changes_dynamics(self) -> None:
         self.model.eval()
         initial_state = torch.randn(2, 9, 12)
@@ -126,6 +150,31 @@ class WorldActionTransformerTest(unittest.TestCase):
             actions,
             torch.full((2, 1), 0.2),
             self.spec_ids,
+        )
+
+        self.assertGreater((first.delta - second.delta).abs().max().item(), 1e-6)
+
+    def test_dynamics_start_time_changes_discrete_timestep_embedding(self) -> None:
+        self.model.eval()
+        initial_state = torch.randn(2, 9, 12)
+        actions = torch.randn(2, 1, 2)
+        delta_time = torch.full((2, 1), 0.1)
+
+        first = self.model.predict_delta(
+            self.condition,
+            initial_state,
+            actions,
+            delta_time,
+            self.spec_ids,
+            start_time=0,
+        )
+        second = self.model.predict_delta(
+            self.condition,
+            initial_state,
+            actions,
+            delta_time,
+            self.spec_ids,
+            start_time=3,
         )
 
         self.assertGreater((first.delta - second.delta).abs().max().item(), 1e-6)
