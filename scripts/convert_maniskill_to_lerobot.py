@@ -176,7 +176,7 @@ def main() -> None:
             int(reader.episode_records[episode_id]["elapsed_steps"])
             for episode_id in reader.episode_ids
         )
-        validate_converted_lerobot_dataset(
+        validation = validate_converted_lerobot_dataset(
             output_root,
             source["repo_id"],
             expected_episodes=len(reader.episode_ids),
@@ -198,6 +198,9 @@ def main() -> None:
                     "status": "valid",
                     "episodes": len(reader.episode_ids),
                     "frames": expected_frames,
+                    "valid_transitions": validation["valid_transitions"],
+                    "successes": validation["successes"],
+                    "videos": validation["videos"],
                     "dataset_spec_hash": configured_dataset.content_hash,
                     "action_spec_hash": configured_action.content_hash,
                 },

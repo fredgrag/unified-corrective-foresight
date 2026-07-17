@@ -681,8 +681,9 @@ def validate_converted_lerobot_dataset(
     repo_id: str,
     expected_episodes: int,
     expected_frames: int,
-) -> None:
+) -> dict[str, int]:
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    import pyarrow.dataset as pyarrow_dataset
 
     reopened = LeRobotDataset(repo_id=repo_id, root=root, video_backend="torchcodec")
     if reopened.meta.total_episodes != expected_episodes:
@@ -695,6 +696,121 @@ def validate_converted_lerobot_dataset(
             raise ValueError(f"converted LeRobot video is missing: {video_key}")
     if reopened.meta.info.get("ucf", {}).get("schema_version") != 1:
         raise ValueError("converted LeRobot provenance metadata is missing")
+    provenance = reopened.meta.info["ucf"].get("provenance")
+    if not isinstance(provenance, Mapping):
+        raise ValueError("converted LeRobot provenance is invalid")
+    output_splits = provenance.get("output_splits")
+    if not isinstance(output_splits, Mapping):
+        raise ValueError("converted LeRobot output splits are missing")
+    normalized_splits = {
+        name: tuple(int(episode_id) for episode_id in output_splits.get(name, ()))
+        for name in ("train", "validation", "evaluation")
+    }
+    split_ids = [episode_id for values in normalized_splits.values() for episode_id in values]
+    if len(split_ids) != len(set(split_ids)) or set(split_ids) != set(
+        range(expected_episodes)
+    ):
+        raise ValueError("converted LeRobot splits are not disjoint and complete")
+
+    data_paths = tuple(sorted((root / "data").rglob("*.parquet")))
+    if not data_paths:
+        raise ValueError("converted LeRobot dataset has no data Parquet files")
+    table = pyarrow_dataset.dataset(
+        [str(path) for path in data_paths], format="parquet"
+    ).to_table(
+        columns=[
+            "index",
+            "episode_index",
+            "frame_index",
+            "timestamp",
+            "action",
+            "next.success",
+        ]
+    )
+    indices = np.asarray(table["index"].to_numpy(), dtype=np.int64)
+    order = np.argsort(indices)
+    indices = indices[order]
+    if not np.array_equal(indices, np.arange(expected_frames)):
+        raise ValueError("converted LeRobot global frame indices are not contiguous")
+    episode_indices = np.asarray(
+        table["episode_index"].to_numpy(), dtype=np.int64
+    )[order]
+    frame_indices = np.asarray(table["frame_index"].to_numpy(), dtype=np.int64)[
+        order
+    ]
+    timestamps = np.asarray(table["timestamp"].to_numpy(), dtype=np.float64)[order]
+    actions = np.asarray(table["action"].to_pylist(), dtype=np.float64)[order]
+    successes = np.asarray(
+        table["next.success"].to_numpy(), dtype=np.float64
+    )[order]
+    if actions.shape != (expected_frames, 7) or not np.isfinite(actions).all():
+        raise ValueError("converted LeRobot actions are invalid")
+    if not np.isfinite(successes).all() or not np.isin(successes, (0.0, 1.0)).all():
+        raise ValueError("converted LeRobot success values are not binary")
+
+    physical_lower = np.asarray(
+        (-0.1, -0.1, -0.1, -0.1, -0.1, -0.1, -0.01)
+    )
+    physical_upper = np.asarray((0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.04))
+    if np.any(actions < physical_lower - 1e-6) or np.any(
+        actions > physical_upper + 1e-6
+    ):
+        raise ValueError("converted LeRobot actions exceed physical ActionSpec bounds")
+
+    episode_records = sorted(
+        reopened.meta.episodes, key=lambda record: int(record["episode_index"])
+    )
+    if [int(record["episode_index"]) for record in episode_records] != list(
+        range(expected_episodes)
+    ):
+        raise ValueError("converted LeRobot episode indices are not contiguous")
+    valid_transitions = 0
+    final_success_count = 0
+    for record in episode_records:
+        episode_id = int(record["episode_index"])
+        start = int(record["dataset_from_index"])
+        stop = int(record["dataset_to_index"])
+        length = int(record["length"])
+        if stop - start != length or length <= 0:
+            raise ValueError(f"converted episode {episode_id} length metadata is invalid")
+        if not np.all(episode_indices[start:stop] == episode_id):
+            raise ValueError(f"converted episode {episode_id} frame ownership is invalid")
+        if not np.array_equal(frame_indices[start:stop], np.arange(length)):
+            raise ValueError(f"converted episode {episode_id} frame indices are invalid")
+        expected_timestamps = np.arange(length, dtype=np.float64) / reopened.fps
+        if not np.allclose(
+            timestamps[start:stop], expected_timestamps, atol=1e-7, rtol=0.0
+        ):
+            raise ValueError(f"converted episode {episode_id} timestamps are invalid")
+        valid_transitions += length - 1
+        final_success_count += int(successes[stop - 1])
+
+    source = provenance.get("source")
+    if not isinstance(source, Mapping) or final_success_count != int(
+        source.get("success_count", -1)
+    ):
+        raise ValueError("converted LeRobot final success distribution mismatches source")
+
+    training_mask = np.isin(episode_indices, normalized_splits["train"])
+    training_actions = actions[training_mask]
+    training_stats = reopened.meta.info["ucf"].get("train_action_stats")
+    if not isinstance(training_stats, Mapping):
+        raise ValueError("converted LeRobot training action stats are missing")
+    expected_count = int(training_stats.get("count", -1))
+    if training_actions.shape[0] != expected_count:
+        raise ValueError("converted LeRobot training action count mismatches metadata")
+    for stat_name, actual in (
+        ("mean", training_actions.mean(axis=0)),
+        ("std", training_actions.std(axis=0)),
+    ):
+        expected = np.asarray(training_stats.get(stat_name), dtype=np.float64)
+        if expected.shape != (7,) or not np.allclose(
+            actual, expected, atol=1e-7, rtol=1e-6
+        ):
+            raise ValueError(
+                f"converted LeRobot training action {stat_name} mismatches metadata"
+            )
+
     for index in {0, expected_frames - 1}:
         item = reopened[index]
         for key in ("observation.images.base", "observation.images.wrist"):
@@ -705,6 +821,13 @@ def validate_converted_lerobot_dataset(
             raise ValueError("converted proprio shape mismatch")
         if torch.as_tensor(item["action"]).shape != (7,):
             raise ValueError("converted action shape mismatch")
+    return {
+        "episodes": expected_episodes,
+        "frames": expected_frames,
+        "valid_transitions": valid_transitions,
+        "successes": final_success_count,
+        "videos": len(video_paths),
+    }
 
 
 def convert_to_lerobot_v3(
