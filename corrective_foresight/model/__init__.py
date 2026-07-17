@@ -1,4 +1,8 @@
 """Token-level world-action model components."""
+from corrective_foresight.model.action_adapters import (
+    ActionAdapter,
+    ActionAdapterRegistry,
+)
 from corrective_foresight.model.dinov3_backbone import (
     DINOV3_MODEL_ID,
     DINOV3_MODEL_REVISION,
@@ -6,6 +10,13 @@ from corrective_foresight.model.dinov3_backbone import (
     PatchGrid,
 )
 from corrective_foresight.model.ema import EMAStateTarget
+from corrective_foresight.model.flow import (
+    FlowTrainingSample,
+    IntegrationReport,
+    masked_velocity_mse,
+    sample_flow_training,
+    sample_rectified_flow,
+)
 from corrective_foresight.model.spatial_resampler import AnchoredSpatialResampler
 from corrective_foresight.model.state_encoder import OnlineStateEncoder, StateAdapter
 from corrective_foresight.model.token_types import TokenMetadata, TokenRole, TokenView
@@ -18,11 +29,15 @@ from corrective_foresight.model.token_views import (
 from corrective_foresight.model.transformer import CausalTokenTransformer
 
 __all__ = [
+    "ActionAdapter",
+    "ActionAdapterRegistry",
     "AnchoredSpatialResampler",
     "DINOV3_MODEL_ID",
     "DINOV3_MODEL_REVISION",
     "DinoV3PatchBackbone",
     "EMAStateTarget",
+    "FlowTrainingSample",
+    "IntegrationReport",
     "OnlineStateEncoder",
     "PatchGrid",
     "StateAdapter",
@@ -34,4 +49,7 @@ __all__ = [
     "build_forward_view",
     "build_inverse_view",
     "build_policy_view",
+    "masked_velocity_mse",
+    "sample_flow_training",
+    "sample_rectified_flow",
 ]
