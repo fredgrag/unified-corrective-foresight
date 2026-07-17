@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import math
 from types import MappingProxyType
 
@@ -224,3 +224,40 @@ class Trainer:
         ) / (self.config.total_steps - self.config.warmup_steps)
         progress = min(max(progress, 0.0), 1.0)
         return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    def state_dict(self) -> dict[str, object]:
+        return {
+            "version": 1,
+            "config": asdict(self.config),
+            "optimizer": self.optimizer.state_dict(),
+            "scheduler": self.scheduler.state_dict(),
+            "scaler": self.scaler.state_dict(),
+            "micro_steps": self._micro_steps,
+            "last_ema_step": self.policy.last_ema_step,
+        }
+
+    def load_state_dict(self, state: Mapping[str, object]) -> None:
+        required = {
+            "version",
+            "config",
+            "optimizer",
+            "scheduler",
+            "scaler",
+            "micro_steps",
+            "last_ema_step",
+        }
+        if set(state) != required:
+            raise ValueError("trainer state fields do not match checkpoint contract")
+        if state["version"] != 1 or state["config"] != asdict(self.config):
+            raise ValueError("trainer state configuration mismatch")
+        micro_steps = state["micro_steps"]
+        last_ema_step = state["last_ema_step"]
+        if type(micro_steps) is not int or micro_steps < 0:
+            raise ValueError("trainer micro_steps must be nonnegative")
+        if type(last_ema_step) is not int or last_ema_step < -1:
+            raise ValueError("trainer last_ema_step is invalid")
+        self.optimizer.load_state_dict(state["optimizer"])
+        self.scheduler.load_state_dict(state["scheduler"])
+        self.scaler.load_state_dict(state["scaler"])
+        self._micro_steps = micro_steps
+        self.policy.restore_ema_step(last_ema_step)

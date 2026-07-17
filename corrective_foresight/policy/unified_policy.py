@@ -312,6 +312,11 @@ class UnifiedCorrectiveForesightPolicy(nn.Module):
         self.ema_state_target.update()
         self._last_ema_step = global_step
 
+    def restore_ema_step(self, value: int) -> None:
+        if type(value) is not int or value < -1:
+            raise ValueError("restored EMA step must be an integer >= -1")
+        self._last_ema_step = value
+
     def _validate_observation(self, observation: PolicyObservation) -> None:
         if not isinstance(observation, PolicyObservation):
             raise ValueError("observation must be PolicyObservation")
