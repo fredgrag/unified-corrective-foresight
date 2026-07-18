@@ -129,6 +129,37 @@ class ExpectedCheckpointContract:
 
 
 @dataclass(frozen=True, slots=True)
+class ExpectedPolicyCheckpointContract:
+    policy: UnifiedCorrectiveForesightPolicy
+    condition_vocabulary_hash: str
+    dataset_spec_hashes: Mapping[str, str]
+    action_spec_hashes: Mapping[str, str]
+    lerobot_version: str
+    backbone_provenance: Mapping[str, str]
+    dataset_revisions: Mapping[str, str]
+    model_config: Mapping[str, Any]
+    loss_config: Mapping[str, Any]
+
+    @classmethod
+    def from_state(cls, state: CheckpointState) -> ExpectedPolicyCheckpointContract:
+        return cls(
+            policy=state.policy,
+            condition_vocabulary_hash=state.policy.condition_encoder.vocabulary_hash,
+            dataset_spec_hashes={
+                spec.dataset_id: spec.content_hash for spec in state.dataset_specs
+            },
+            action_spec_hashes={
+                spec.spec_id: spec.content_hash for spec in state.action_specs
+            },
+            lerobot_version=state.lerobot_version,
+            backbone_provenance=dict(state.backbone_provenance),
+            dataset_revisions=dict(state.dataset_revisions),
+            model_config=dict(state.model_config),
+            loss_config=dict(state.loss_config),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ResumeState:
     epoch: int
     global_step: int
@@ -225,6 +256,85 @@ def load_checkpoint_strict(
         global_step=steps["global_step"],
         optimizer_step=steps["optimizer_step"],
         cycle_warmup_step=steps["cycle_warmup_step"],
+        manifest=manifest,
+    )
+
+
+def load_policy_checkpoint_strict(
+    path: str | Path,
+    expected: ExpectedPolicyCheckpointContract,
+) -> ResumeState:
+    source = Path(path)
+    if not source.is_dir() or source.is_symlink():
+        raise ValueError("checkpoint path must be a physical directory")
+    entries = {item.name for item in source.iterdir()}
+    if entries != ALL_FILES:
+        raise ValueError(
+            f"checkpoint files must be exactly {sorted(ALL_FILES)}, got {sorted(entries)}"
+        )
+    if any(item.is_symlink() for item in source.iterdir()):
+        raise ValueError("checkpoint payload cannot contain symbolic links")
+    manifest = RunManifest.from_json(
+        (source / "manifest.json").read_text(encoding="utf-8")
+    )
+    _validate_expected_policy_contract(manifest, expected)
+    _verify_payloads(source, manifest)
+
+    online = load_file(str(source / "online_model.safetensors"), device="cpu")
+    ema = load_file(str(source / "ema_target.safetensors"), device="cpu")
+    expected_online = _online_state(expected.policy)
+    expected_ema = _cpu_state(expected.policy.ema_state_target.adapter.state_dict())
+    _validate_state_mapping(expected_online, online, "online model")
+    _validate_state_mapping(expected_ema, ema, "EMA target")
+    _copy_policy_state(expected.policy, online)
+    _copy_module_state(expected.policy.ema_state_target.adapter, ema)
+    steps = manifest.value["steps"]
+    expected.policy.restore_ema_step(steps["optimizer_step"] - 1)
+    return ResumeState(
+        epoch=manifest.value["epoch"],
+        global_step=steps["global_step"],
+        optimizer_step=steps["optimizer_step"],
+        cycle_warmup_step=steps["cycle_warmup_step"],
+        manifest=manifest,
+    )
+
+
+def load_policy_checkpoint_warmstart(
+    path: str | Path,
+    expected: ExpectedPolicyCheckpointContract,
+) -> ResumeState:
+    source = Path(path)
+    if not source.is_dir() or source.is_symlink():
+        raise ValueError("checkpoint path must be a physical directory")
+    entries = {item.name for item in source.iterdir()}
+    if entries != ALL_FILES:
+        raise ValueError(
+            f"checkpoint files must be exactly {sorted(ALL_FILES)}, got {sorted(entries)}"
+        )
+    if any(item.is_symlink() for item in source.iterdir()):
+        raise ValueError("checkpoint payload cannot contain symbolic links")
+    manifest = RunManifest.from_json(
+        (source / "manifest.json").read_text(encoding="utf-8")
+    )
+    _validate_expected_policy_contract(manifest, expected, include_loss_config=False)
+    _verify_payloads(source, manifest)
+    online = load_file(str(source / "online_model.safetensors"), device="cpu")
+    ema = load_file(str(source / "ema_target.safetensors"), device="cpu")
+    _validate_state_mapping(_online_state(expected.policy), online, "online model")
+    _validate_state_mapping(
+        _cpu_state(expected.policy.ema_state_target.adapter.state_dict()),
+        ema,
+        "EMA target",
+    )
+    _copy_policy_state(expected.policy, online)
+    _copy_module_state(expected.policy.ema_state_target.adapter, ema)
+    expected.policy.restore_ema_step(-1)
+    steps = manifest.value["steps"]
+    return ResumeState(
+        epoch=0,
+        global_step=0,
+        optimizer_step=0,
+        cycle_warmup_step=0,
         manifest=manifest,
     )
 
@@ -389,6 +499,50 @@ def _validate_expected_contract(
         "git_commit": expected.git_commit,
         "git_dirty": expected.git_dirty,
     }
+    for name in wanted:
+        if actual[name] != wanted[name]:
+            raise ValueError(
+                f"checkpoint contract mismatch for {name}: "
+                f"expected {wanted[name]!r}, got {actual[name]!r}"
+            )
+
+
+def _validate_expected_policy_contract(
+    manifest: RunManifest,
+    expected: ExpectedPolicyCheckpointContract,
+    *,
+    include_loss_config: bool = True,
+) -> None:
+    value = manifest.value
+    actual = {
+        "condition_vocabulary_hash": value["condition_vocabulary"]["content_hash"],
+        "dataset_spec_hashes": {
+            name: entry["content_hash"]
+            for name, entry in value["dataset_specs"].items()
+        },
+        "action_spec_hashes": {
+            name: entry["content_hash"]
+            for name, entry in value["action_specs"].items()
+        },
+        "lerobot_version": value["runtime"]["lerobot_version"],
+        "backbone_provenance": dict(value["backbone_provenance"]),
+        "dataset_revisions": dict(value["dataset_revisions"]),
+        "model_config": dict(value["model_config"]),
+        "loss_config": dict(value["loss_config"]),
+    }
+    wanted = {
+        "condition_vocabulary_hash": expected.condition_vocabulary_hash,
+        "dataset_spec_hashes": dict(expected.dataset_spec_hashes),
+        "action_spec_hashes": dict(expected.action_spec_hashes),
+        "lerobot_version": expected.lerobot_version,
+        "backbone_provenance": dict(expected.backbone_provenance),
+        "dataset_revisions": dict(expected.dataset_revisions),
+        "model_config": dict(expected.model_config),
+        "loss_config": dict(expected.loss_config),
+    }
+    if not include_loss_config:
+        actual.pop("loss_config")
+        wanted.pop("loss_config")
     for name in wanted:
         if actual[name] != wanted[name]:
             raise ValueError(

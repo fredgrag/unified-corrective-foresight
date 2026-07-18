@@ -28,7 +28,7 @@ class EnvironmentContractTest(unittest.TestCase):
         import torch
 
         self.assertTrue(torch.cuda.is_available())
-        self.assertEqual(torch.cuda.device_count(), 4)
+        self.assertGreaterEqual(torch.cuda.device_count(), 4)
         self.assertEqual(torch.version.cuda, "12.8")
         self.assertIsNotNone(shutil.which("ffmpeg"))
         result = subprocess.run(

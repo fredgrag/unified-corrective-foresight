@@ -16,8 +16,10 @@ from corrective_foresight.data.stateful_sampler import (
 from corrective_foresight.training.checkpoint import (
     CheckpointState,
     ExpectedCheckpointContract,
+    ExpectedPolicyCheckpointContract,
     load_legacy_weights_explicit,
     load_checkpoint_strict,
+    load_policy_checkpoint_strict,
     save_checkpoint_atomic,
 )
 from corrective_foresight.training.trainer import Trainer, TrainerConfig
@@ -133,6 +135,32 @@ class CheckpointValidationTest(unittest.TestCase):
                 destination_mixer["generator_state"],
                 source_mixer["generator_state"],
             )
+            for source_parameter, destination_parameter in zip(
+                source.policy.parameters(),
+                destination.policy.parameters(),
+                strict=True,
+            ):
+                torch.testing.assert_close(
+                    source_parameter,
+                    destination_parameter,
+                    rtol=0.0,
+                    atol=0.0,
+                )
+
+    def test_policy_only_strict_load_verifies_checkpoint_and_restores_ema_step(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "checkpoint-000007"
+            source = make_state()
+            save_checkpoint_atomic(path, source)
+            destination = make_state()
+
+            resume = load_policy_checkpoint_strict(
+                path,
+                ExpectedPolicyCheckpointContract.from_state(destination),
+            )
+
+            self.assertEqual(resume.global_step, 7)
+            self.assertEqual(destination.policy.last_ema_step, 6)
             for source_parameter, destination_parameter in zip(
                 source.policy.parameters(),
                 destination.policy.parameters(),

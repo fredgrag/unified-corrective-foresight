@@ -1,5 +1,4 @@
-"""Unified policy facade."""
-"""Unified training and closed-loop policy composition."""
+"""Unified policy facade and training/closed-loop composition."""
 
 from corrective_foresight.policy.unified_policy import (
     ActionChunkPrediction,
