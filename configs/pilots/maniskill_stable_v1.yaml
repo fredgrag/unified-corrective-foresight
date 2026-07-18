@@ -1,0 +1,13 @@
+schema_version: 1
+pilot_id: maniskill.pick_cube.stable.v1
+world_experiment: configs/experiments/maniskill_world_pretrain.yaml
+unified_experiment: configs/experiments/maniskill_unified.yaml
+world_steps: 1000
+unified_steps: 2000
+checkpoint_interval: 250
+validation_interval: 100
+validation_batches_per_rank: 8
+evaluation_steps: [0, 1000, 2000]
+evaluation_seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+gpu_indices: [0, 1, 2, 3]
+output_root: /mnt/workspace/wwl/corrective-foresight/unified_corrective_foresight/artifacts/runs/maniskill_pilot_20260718

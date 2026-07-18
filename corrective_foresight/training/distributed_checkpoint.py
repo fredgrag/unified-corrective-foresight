@@ -26,6 +26,7 @@ from corrective_foresight.training.checkpoint import (
     _fsync_file,
     _online_state,
     _validate_expected_contract,
+    _validate_expected_policy_contract,
     _validate_state_mapping,
 )
 from corrective_foresight.training.distributed import DistributedContext
@@ -178,6 +179,105 @@ def load_distributed_checkpoint_strict(
         global_step=steps["global_step"],
         optimizer_step=steps["optimizer_step"],
         cycle_warmup_step=steps["cycle_warmup_step"],
+        manifest=manifest,
+    )
+
+
+def load_distributed_policy_checkpoint_strict(
+    path: str | Path,
+    expected,
+    context: DistributedContext,
+) -> ResumeState:
+    """Load only shared policy/EMA payloads from a v2 checkpoint for stage warm-start."""
+    _require_context(context)
+    source = Path(path)
+    if not source.is_dir() or source.is_symlink():
+        raise ValueError("checkpoint path must be a physical directory")
+    manifest = RunManifest.from_json(
+        (source / "manifest.json").read_text(encoding="utf-8")
+    )
+    if manifest.value["format_version"] != DISTRIBUTED_FORMAT_VERSION:
+        raise ValueError("distributed policy loader requires checkpoint manifest format_version 2")
+    distributed = manifest.value["distributed"]
+    if distributed["world_size"] != context.world_size:
+        raise ValueError("checkpoint world size does not match current process group")
+    rank_files = set(distributed["rank_payloads"])
+    expected_files = _SHARED_PAYLOAD_FILES | rank_files | {"manifest.json"}
+    entries = {item.name for item in source.iterdir()}
+    if entries != expected_files:
+        raise ValueError(
+            f"distributed checkpoint files must be exactly {sorted(expected_files)}, "
+            f"got {sorted(entries)}"
+        )
+    if any(item.is_symlink() for item in source.iterdir()):
+        raise ValueError("distributed checkpoint payload cannot contain symbolic links")
+    _validate_expected_policy_contract(manifest, expected, include_loss_config=False)
+    _verify_distributed_payloads(source, manifest, expected_files - {"manifest.json"})
+    online = load_file(str(source / "online_model.safetensors"), device="cpu")
+    ema = load_file(str(source / "ema_target.safetensors"), device="cpu")
+    _validate_state_mapping(_online_state(expected.policy), online, "online model")
+    _validate_state_mapping(
+        _cpu_state(expected.policy.ema_state_target.adapter.state_dict()),
+        ema,
+        "EMA target",
+    )
+    _copy_policy_state(expected.policy, online)
+    _copy_module_state(expected.policy.ema_state_target.adapter, ema)
+    expected.policy.restore_ema_step(-1)
+    steps = manifest.value["steps"]
+    return ResumeState(
+        epoch=0,
+        global_step=0,
+        optimizer_step=0,
+        cycle_warmup_step=0,
+        manifest=manifest,
+    )
+
+
+def load_distributed_policy_checkpoint_for_evaluation(
+    path: str | Path,
+    expected,
+) -> ResumeState:
+    """Load v2 shared policy payloads on one evaluation process without a group."""
+    source = Path(path)
+    if not source.is_dir() or source.is_symlink():
+        raise ValueError("checkpoint path must be a physical directory")
+    manifest = RunManifest.from_json(
+        (source / "manifest.json").read_text(encoding="utf-8")
+    )
+    if manifest.value["format_version"] != DISTRIBUTED_FORMAT_VERSION:
+        raise ValueError("distributed evaluation loader requires checkpoint manifest format_version 2")
+    distributed = manifest.value["distributed"]
+    expected_files = _SHARED_PAYLOAD_FILES | set(distributed["rank_payloads"]) | {
+        "manifest.json"
+    }
+    entries = {item.name for item in source.iterdir()}
+    if entries != expected_files:
+        raise ValueError(
+            f"distributed checkpoint files must be exactly {sorted(expected_files)}, "
+            f"got {sorted(entries)}"
+        )
+    if any(item.is_symlink() for item in source.iterdir()):
+        raise ValueError("distributed checkpoint payload cannot contain symbolic links")
+    _validate_expected_policy_contract(manifest, expected, include_loss_config=False)
+    _verify_distributed_payloads(source, manifest, expected_files - {"manifest.json"})
+    online = load_file(str(source / "online_model.safetensors"), device="cpu")
+    ema = load_file(str(source / "ema_target.safetensors"), device="cpu")
+    _validate_state_mapping(_online_state(expected.policy), online, "online model")
+    _validate_state_mapping(
+        _cpu_state(expected.policy.ema_state_target.adapter.state_dict()),
+        ema,
+        "EMA target",
+    )
+    _copy_policy_state(expected.policy, online)
+    _copy_module_state(expected.policy.ema_state_target.adapter, ema)
+    expected.policy.restore_ema_step(-1)
+    steps = manifest.value["steps"]
+    return ResumeState(
+        epoch=0,
+        global_step=0,
+        optimizer_step=0,
+        cycle_warmup_step=0,
         manifest=manifest,
     )
 

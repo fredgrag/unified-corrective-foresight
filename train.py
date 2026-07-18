@@ -17,6 +17,7 @@ from corrective_foresight.data.lerobot_adapter import LeRobotTrajectoryAdapter
 from corrective_foresight.data.mixer import BalancedLeRobotMixer
 from corrective_foresight.data.stateful_sampler import StatefulDistributedBatchSampler
 from corrective_foresight.data.batch import TrajectoryBatch
+from corrective_foresight.config.pilot import load_pilot_config
 from corrective_foresight.runtime import (
     ProductionRuntime,
     assemble_runtime_policy,
@@ -30,9 +31,16 @@ from corrective_foresight.training.checkpoint import (
     load_policy_checkpoint_warmstart,
     save_checkpoint_atomic,
 )
+from corrective_foresight.training.distributed_checkpoint import (
+    load_distributed_checkpoint_strict,
+    load_distributed_policy_checkpoint_strict,
+    save_distributed_checkpoint_atomic,
+)
 from corrective_foresight.training.distributed import DistributedContext
+from corrective_foresight.training.pilot import PilotController
 from corrective_foresight.training.stages import TrainingStage
-from corrective_foresight.training.trainer import Trainer, TrainerConfig
+from corrective_foresight.training.trainer import Trainer, TrainerConfig, TrainStepResult
+from corrective_foresight.training.validation import ValidationConfig, ValidationRunner
 
 
 class BatchSource(Protocol):
@@ -40,6 +48,7 @@ class BatchSource(Protocol):
 
 
 MetricLogger = Callable[[dict[str, float | int | str]], None]
+OptimizerStepCallback = Callable[[int, TrainStepResult], None]
 
 
 def run_training(
@@ -52,6 +61,7 @@ def run_training(
     generator_seed: int,
     metric_logger: MetricLogger,
     flow_generator: torch.Generator | None = None,
+    optimizer_step_callback: OptimizerStepCallback | None = None,
 ) -> int:
     stage = TrainingStage.parse(stage)
     if type(optimizer_steps) is not int or optimizer_steps <= 0:
@@ -62,6 +72,8 @@ def run_training(
         raise ValueError("generator_seed must be a nonnegative integer")
     if not callable(metric_logger):
         raise ValueError("metric_logger must be callable")
+    if optimizer_step_callback is not None and not callable(optimizer_step_callback):
+        raise ValueError("optimizer_step_callback must be callable")
     device = trainer.distributed_context.device
     if flow_generator is None:
         generator = torch.Generator(device=device).manual_seed(generator_seed)
@@ -101,6 +113,8 @@ def run_training(
         )
         metric_logger(record)
         global_step += 1
+        if optimizer_step_callback is not None:
+            optimizer_step_callback(global_step, result)
     return global_step
 
 
@@ -116,8 +130,10 @@ def positive_int(value: str) -> int:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--config", type=Path)
     parser.add_argument("--stage", choices=("world_pretrain", "unified"))
+    parser.add_argument("--pilot-config", type=Path)
+    parser.add_argument("--pilot-stage", choices=("world_pretrain", "unified"))
     parser.add_argument("--steps", type=positive_int)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--init-checkpoint", type=Path)
@@ -125,6 +141,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--metrics-output", type=Path)
     parser.add_argument("--initialize-only", action="store_true")
     args = parser.parse_args(argv)
+    if (args.config is None) == (args.pilot_config is None):
+        parser.error("exactly one of --config or --pilot-config is required")
+    if args.pilot_config is not None and args.pilot_stage is None:
+        parser.error("--pilot-stage is required with --pilot-config")
+    if args.pilot_config is not None and args.stage is not None:
+        parser.error("--stage cannot be combined with --pilot-config")
+    if args.pilot_config is not None and args.steps is not None:
+        parser.error("--steps cannot be combined with --pilot-config")
     if args.resume is not None and args.init_checkpoint is not None:
         parser.error("--resume and --init-checkpoint are mutually exclusive")
     if args.initialize_only and (args.resume is not None or args.init_checkpoint is not None):
@@ -134,8 +158,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    runtime = load_production_runtime(args.config)
-    stage = args.stage or runtime.config.stage
+    pilot = load_pilot_config(args.pilot_config) if args.pilot_config else None
+    if pilot is None:
+        runtime = load_production_runtime(args.config)
+        stage = args.stage or runtime.config.stage
+        target_steps = args.steps or runtime.config.training.total_steps
+        stage_output_root = runtime.config.output_root
+    else:
+        stage = args.pilot_stage
+        experiment = (
+            pilot.world_experiment
+            if stage == "world_pretrain"
+            else pilot.unified_experiment
+        )
+        runtime = load_production_runtime(experiment)
+        target_steps = (
+            pilot.world_steps if stage == "world_pretrain" else pilot.unified_steps
+        )
+        stage_output_root = pilot.output_root / stage
     if stage != runtime.config.stage:
         raise ValueError("--stage must match the experiment config stage")
     if not torch.cuda.is_available():
@@ -145,7 +185,7 @@ def main(argv: list[str] | None = None) -> None:
     torch.manual_seed(runtime.config.seed)
     torch.cuda.manual_seed_all(runtime.config.seed)
     policy = assemble_runtime_policy(runtime, device=device)
-    mixer = _build_mixer(runtime, context)
+    mixer = _build_mixer(runtime, context, split="train")
     training = runtime.config.training
     trainer = Trainer(
         policy,
@@ -166,24 +206,97 @@ def main(argv: list[str] | None = None) -> None:
     state = _checkpoint_state(runtime, policy, trainer, mixer, flow_generator, context)
     start_global_step = 0
     if args.resume is not None:
-        resume = load_checkpoint_strict(
-            args.resume.resolve(strict=True),
-            ExpectedCheckpointContract.from_state(state),
-        )
+        resume_path = args.resume.resolve(strict=True)
+        if pilot is not None or context.world_size > 1:
+            resume = load_distributed_checkpoint_strict(
+                resume_path,
+                ExpectedCheckpointContract.from_state(state),
+                context,
+            )
+        else:
+            resume = load_checkpoint_strict(
+                resume_path,
+                ExpectedCheckpointContract.from_state(state),
+            )
         start_global_step = resume.global_step
     elif args.init_checkpoint is not None:
-        load_policy_checkpoint_warmstart(
-            args.init_checkpoint.resolve(strict=True),
-            expected_policy_checkpoint_contract(runtime, policy),
-        )
+        init_path = args.init_checkpoint.resolve(strict=True)
+        if pilot is not None and context.world_size > 1:
+            load_distributed_policy_checkpoint_strict(
+                init_path,
+                expected_policy_checkpoint_contract(runtime, policy),
+                context,
+            )
+        else:
+            load_policy_checkpoint_warmstart(
+                init_path,
+                expected_policy_checkpoint_contract(runtime, policy),
+            )
         policy.restore_ema_step(-1)
 
-    if args.initialize_only:
+    controller = None
+    if pilot is not None:
+        validation_mixer = _build_mixer(
+            runtime,
+            context,
+            split="validation",
+            sampler_seed_offset=1000,
+            mixer_seed_offset=2000,
+        )
+        validation_runner = ValidationRunner(
+            policy=policy,
+            validation_mixer=validation_mixer,
+            context=context,
+            config=ValidationConfig(
+                batches_per_rank=pilot.validation_batches_per_rank,
+                generator_seed=runtime.config.seed + 400,
+            ),
+        )
+
+        def save_pilot_checkpoint(step: int) -> None:
+            destination = stage_output_root / "checkpoints" / f"{stage}-{step:06d}"
+            checkpoint_state = _checkpoint_state(
+                runtime,
+                policy,
+                trainer,
+                mixer,
+                flow_generator,
+                context,
+                global_step=step,
+            )
+            if context.world_size > 1:
+                save_distributed_checkpoint_atomic(destination, checkpoint_state, context)
+            elif context.rank == 0:
+                save_checkpoint_atomic(destination, checkpoint_state)
+            if context.rank == 0:
+                print(f"checkpoint={destination.resolve()}")
+
+        controller = PilotController(
+            stage=stage,
+            checkpoint_interval=pilot.checkpoint_interval,
+            validation_interval=pilot.validation_interval,
+            output_root=stage_output_root,
+            rank=context.rank,
+            world_size=context.world_size,
+            validate=lambda step: validation_runner.evaluate(stage, step),
+            save_checkpoint=save_pilot_checkpoint,
+        )
+        if args.initialize_only:
+            controller.save_initial()
+            final_step = 0
+        else:
+            if start_global_step > target_steps:
+                raise ValueError("resume step exceeds pilot stage target")
+            final_step = target_steps
+            if start_global_step == 0:
+                controller.save_initial()
+    elif args.initialize_only:
         final_step = 0
     else:
-        final_step = start_global_step + (args.steps or training.total_steps)
+        final_step = start_global_step + target_steps
+    if not args.initialize_only:
         metrics_path = args.metrics_output or (
-            runtime.config.output_root / "metrics" / f"rank-{context.rank}.jsonl"
+            stage_output_root / "metrics" / f"rank-{context.rank}.jsonl"
         )
         logger = _jsonl_logger(metrics_path) if context.rank == 0 else (lambda _: None)
         run_training(
@@ -195,14 +308,17 @@ def main(argv: list[str] | None = None) -> None:
             generator_seed=runtime.config.seed + 300,
             metric_logger=logger,
             flow_generator=flow_generator,
+            optimizer_step_callback=(controller.on_optimizer_step if controller else None),
         )
-    if context.world_size > 1:
+    if controller is not None:
+        controller.finish(final_step)
+    elif context.world_size > 1:
         dist.barrier()
-    if context.rank == 0:
+    if controller is None and context.rank == 0:
         destination = args.output_checkpoint
         if destination is None:
             label = "untrained" if args.initialize_only else f"{final_step:06d}"
-            destination = runtime.config.output_root / "checkpoints" / f"{stage}-{label}"
+            destination = stage_output_root / "checkpoints" / f"{stage}-{label}"
         final_state = _checkpoint_state(
             runtime, policy, trainer, mixer, flow_generator, context,
             global_step=final_step,
@@ -233,6 +349,10 @@ def _initialize_distributed_context() -> DistributedContext:
 def _build_mixer(
     runtime: ProductionRuntime,
     context: DistributedContext,
+    *,
+    split: str = "train",
+    sampler_seed_offset: int = 0,
+    mixer_seed_offset: int = 0,
 ) -> BalancedLeRobotMixer:
     datasets = {}
     samplers = {}
@@ -243,7 +363,7 @@ def _build_mixer(
         adapter = LeRobotTrajectoryAdapter(
             dataset_spec,
             action_spec,
-            split="train",
+            split=split,
             context_steps=runtime.config.evaluation.context_steps,
             action_horizon=runtime.config.evaluation.action_horizon,
             video_backend="torchcodec",
@@ -258,7 +378,7 @@ def _build_mixer(
         samplers[dataset_spec.dataset_id] = StatefulDistributedBatchSampler(
             dataset_size=len(conditioned),
             batch_size=runtime.config.training.batch_size_per_rank,
-            seed=runtime.config.seed + 100 + index,
+            seed=runtime.config.seed + 100 + sampler_seed_offset + index,
             rank=context.rank,
             world_size=context.world_size,
         )
@@ -267,7 +387,9 @@ def _build_mixer(
         datasets=datasets,
         samplers=samplers,
         weights=weights,
-        generator=torch.Generator().manual_seed(runtime.config.seed + 200),
+        generator=torch.Generator().manual_seed(
+            runtime.config.seed + 200 + mixer_seed_offset
+        ),
     )
 
 

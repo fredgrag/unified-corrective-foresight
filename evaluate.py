@@ -22,6 +22,10 @@ from corrective_foresight.runtime import (
     load_production_runtime,
 )
 from corrective_foresight.training.checkpoint import load_policy_checkpoint_strict
+from corrective_foresight.training.distributed_checkpoint import (
+    load_distributed_policy_checkpoint_for_evaluation,
+)
+from corrective_foresight.training.run_manifest import RunManifest
 
 
 def flow_seed_stream(base_seed: int, environment_seed: int) -> Iterator[int]:
@@ -44,6 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seeds", type=int, nargs="+", required=True)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--max-steps", type=int)
+    parser.add_argument("--output-root", type=Path)
     return parser.parse_args()
 
 
@@ -80,10 +85,19 @@ def main() -> None:
     torch.cuda.manual_seed_all(runtime.config.seed)
     policy = assemble_runtime_policy(runtime, device=device)
     checkpoint = args.checkpoint.resolve(strict=True)
-    load_policy_checkpoint_strict(
-        checkpoint,
-        expected_policy_checkpoint_contract(runtime, policy),
+    manifest = RunManifest.from_json(
+        (checkpoint / "manifest.json").read_text(encoding="utf-8")
     )
+    if manifest.value["format_version"] == 2:
+        load_distributed_policy_checkpoint_for_evaluation(
+            checkpoint,
+            expected_policy_checkpoint_contract(runtime, policy),
+        )
+    else:
+        load_policy_checkpoint_strict(
+            checkpoint,
+            expected_policy_checkpoint_contract(runtime, policy),
+        )
     manifest_hash = hashlib.sha256((checkpoint / "manifest.json").read_bytes()).hexdigest()
     condition_ids = encode_condition_ids(
         runtime.vocabulary,
@@ -127,7 +141,7 @@ def main() -> None:
             solver_intervals=evaluation.solver_intervals,
             context_steps=evaluation.context_steps,
         ),
-        output_root=evaluation.output_root,
+        output_root=args.output_root or evaluation.output_root,
         max_steps=max_steps,
         action_to_environment=physical_action_to_maniskill_controller,
     )
