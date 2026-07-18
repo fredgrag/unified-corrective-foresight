@@ -22,6 +22,7 @@ MANIFEST_FIELDS = {
     "action_specs",
     "files",
 }
+MANIFEST_DISTRIBUTED_FIELDS = MANIFEST_FIELDS | {"distributed"}
 
 
 def canonical_hash(value: Mapping[str, Any]) -> str:
@@ -40,12 +41,17 @@ class RunManifest:
 
     def __post_init__(self) -> None:
         value = dict(self.value)
-        if set(value) != MANIFEST_FIELDS:
+        if set(value) not in (MANIFEST_FIELDS, MANIFEST_DISTRIBUTED_FIELDS):
             raise ValueError(
-                f"manifest fields must be exactly {sorted(MANIFEST_FIELDS)}"
+                "manifest fields must match v1 or v2 checkpoint contract"
             )
-        if value["format_version"] != 1:
+        format_version = value["format_version"]
+        if format_version not in {1, 2}:
             raise ValueError("unsupported checkpoint manifest format_version")
+        if (format_version == 1) != (set(value) == MANIFEST_FIELDS):
+            raise ValueError("manifest format_version does not match its fields")
+        if format_version == 2:
+            _validate_distributed(value["distributed"])
         if type(value["epoch"]) is not int or value["epoch"] < 0:
             raise ValueError("manifest epoch must be nonnegative")
         _require_exact_int_mapping(
@@ -173,3 +179,23 @@ def _validate_hashed_content(
             or entry["content_hash"] != canonical_hash(entry["content"])
         ):
             raise ValueError(f"manifest {name} hash/content is invalid for {key}")
+
+
+def _validate_distributed(value: object) -> None:
+    if not isinstance(value, Mapping) or set(value) != {"world_size", "rank_payloads"}:
+        raise ValueError("manifest distributed fields are invalid")
+    world_size = value["world_size"]
+    rank_payloads = value["rank_payloads"]
+    if type(world_size) is not int or world_size < 1:
+        raise ValueError("manifest distributed world_size must be a positive integer")
+    if (
+        not isinstance(rank_payloads, list)
+        or len(rank_payloads) != world_size
+        or len(set(rank_payloads)) != world_size
+        or any(
+            not isinstance(name, str)
+            or name != f"rank-{index:04d}-runtime.pt"
+            for index, name in enumerate(rank_payloads)
+        )
+    ):
+        raise ValueError("manifest distributed rank_payloads are invalid")
