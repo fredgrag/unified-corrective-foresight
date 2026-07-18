@@ -7,9 +7,9 @@ legacy implementation.
 The governing design and engineering rule are maintained in the parent
 project documentation:
 
-- `../docs/research/2026-07-16-unified-corrective-foresight-final-design.md`
-- `../docs/engineering/unified-model-implementation-rule.md`
-- `../docs/implementation/2026-07-16-unified-corrective-foresight-core-implementation-plan.md`
+- `docs/research/2026-07-16-unified-corrective-foresight-final-design.md`
+- `docs/engineering/unified-model-implementation-rule.md`
+- `docs/implementation/2026-07-16-unified-corrective-foresight-core-implementation-plan.md`
 
 ## Environment
 
