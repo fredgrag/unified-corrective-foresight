@@ -47,6 +47,20 @@ class BatchSource(Protocol):
     def next_batch(self) -> TrajectoryBatch: ...
 
 
+class _IndexedTrajectoryDataset:
+    def __init__(self, dataset, indices: tuple[int, ...]) -> None:
+        if not indices:
+            raise ValueError("indexed dataset requires at least one valid index")
+        self.dataset = dataset
+        self.indices = indices
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __getitem__(self, index: int):
+        return self.dataset[self.indices[index]]
+
+
 MetricLogger = Callable[[dict[str, float | int | str]], None]
 OptimizerStepCallback = Callable[[int, TrainStepResult], None]
 
@@ -368,8 +382,12 @@ def _build_mixer(
             action_horizon=runtime.config.evaluation.action_horizon,
             video_backend="torchcodec",
         )
-        conditioned = ConditionedTrajectoryDataset(
+        adapter_for_mixer = _IndexedTrajectoryDataset(
             adapter,
+            adapter.full_dynamics_indices,
+        )
+        conditioned = ConditionedTrajectoryDataset(
+            adapter_for_mixer,
             dataset_spec=dataset_spec,
             action_spec=action_spec,
             vocabulary=runtime.vocabulary,

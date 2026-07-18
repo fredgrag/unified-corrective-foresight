@@ -31,6 +31,10 @@ class LeRobotV3FixtureIntegrationTest(unittest.TestCase):
             )
 
             self.assertEqual(len(adapter), EPISODE_LENGTH)
+            self.assertEqual(len(adapter.full_dynamics_indices), 5)
+            for index in adapter.full_dynamics_indices:
+                mask = adapter[index].transition_valid_mask
+                self.assertTrue(mask.unfold(0, 8, 1).all(dim=-1).any().item())
             sample = adapter[0]
             batch = collate_trajectory_samples([sample])
             batch.validate(expected_action_spec_id=action_spec.spec_id)

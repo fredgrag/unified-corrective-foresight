@@ -194,6 +194,7 @@ class LeRobotTrajectoryAdapter:
             tolerance_s=tolerance_s,
             video_backend=video_backend,
         )
+        self._action_horizon = action_horizon
         self._camera_shape = self._resolve_camera_shape(self.dataset.features)
         self._present_camera_roles = {
             role
@@ -215,9 +216,15 @@ class LeRobotTrajectoryAdapter:
             )
         self._required_observation_features = tuple(required_observation_features)
         self.consumed_keys = self._build_consumed_keys()
+        self._full_dynamics_indices = self._build_full_dynamics_indices()
 
     def __len__(self) -> int:
         return len(self.dataset)
+
+    @property
+    def full_dynamics_indices(self) -> tuple[int, ...]:
+        """Rows with at least one complete fixed eight-transition dynamics chain."""
+        return self._full_dynamics_indices
 
     def __getitem__(self, index: int) -> TrajectorySample:
         item = self.dataset[index]
@@ -388,6 +395,39 @@ class LeRobotTrajectoryAdapter:
             raise ValueError(f"split references missing episodes: {sorted(missing_episodes)}")
 
         self._resolve_camera_shape(features)
+
+    def _build_full_dynamics_indices(self) -> tuple[int, ...]:
+        required_horizon = 8
+        if self._action_horizon < required_horizon:
+            return ()
+        episode_lengths = {
+            int(record["episode_index"]): int(record["length"])
+            for record in self.dataset.meta.episodes
+        }
+        episode_indices = self.dataset.hf_dataset["episode_index"]
+        frame_indices = self.dataset.hf_dataset["frame_index"]
+        valid: list[int] = []
+        for index, (episode_value, frame_value) in enumerate(
+            zip(episode_indices, frame_indices, strict=True)
+        ):
+            episode_index = int(episode_value)
+            frame_index = int(frame_value)
+            try:
+                episode_length = episode_lengths[episode_index]
+            except KeyError as error:
+                raise ValueError(
+                    f"LeRobot metadata lacks episode length for {episode_index}"
+                ) from error
+            first_transition = max(frame_index - self.context_index, 0)
+            last_transition = min(
+                frame_index + self._action_horizon - 1,
+                episode_length - 2,
+            )
+            if last_transition - first_transition + 1 >= required_horizon:
+                valid.append(index)
+        if not valid:
+            raise ValueError("dataset split has no complete eight-transition dynamics windows")
+        return tuple(valid)
 
     def _resolve_camera_shape(self, features: Mapping[str, Mapping]) -> tuple[int, int, int]:
         chw_shapes = {
