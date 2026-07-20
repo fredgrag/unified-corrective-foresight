@@ -37,6 +37,7 @@ from corrective_foresight.training.distributed_checkpoint import (
     save_distributed_checkpoint_atomic,
 )
 from corrective_foresight.training.distributed import DistributedContext
+from corrective_foresight.training.gates import PilotStepDecision
 from corrective_foresight.training.pilot import PilotController
 from corrective_foresight.training.stages import TrainingStage
 from corrective_foresight.training.trainer import Trainer, TrainerConfig, TrainStepResult
@@ -62,7 +63,10 @@ class _IndexedTrajectoryDataset:
 
 
 MetricLogger = Callable[[dict[str, float | int | str]], None]
-OptimizerStepCallback = Callable[[int, TrainStepResult], None]
+OptimizerStepCallback = Callable[
+    [int, TrainStepResult],
+    PilotStepDecision | None,
+]
 
 
 def run_training(
@@ -135,7 +139,16 @@ def run_training(
         metric_logger(record)
         global_step += 1
         if optimizer_step_callback is not None:
-            optimizer_step_callback(global_step, result)
+            decision = optimizer_step_callback(global_step, result)
+            if decision is not None and not isinstance(
+                decision,
+                PilotStepDecision,
+            ):
+                raise ValueError(
+                    "optimizer_step_callback must return PilotStepDecision or None"
+                )
+            if decision is not None and decision.should_stop:
+                break
     return global_step
 
 
@@ -320,7 +333,7 @@ def main(argv: list[str] | None = None) -> None:
             stage_output_root / "metrics" / f"rank-{context.rank}.jsonl"
         )
         logger = _jsonl_logger(metrics_path) if context.rank == 0 else (lambda _: None)
-        run_training(
+        final_step = run_training(
             batch_source=mixer,
             trainer=trainer,
             stage=stage,
