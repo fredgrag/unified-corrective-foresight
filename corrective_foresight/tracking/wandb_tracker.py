@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 import json
 import math
@@ -87,6 +87,7 @@ class WandbTracker:
         output_root: Path,
         enabled: bool,
         run: object | None,
+        backend: object | None,
         metadata: TrackingMetadata | None,
     ) -> None:
         self.config = config
@@ -94,6 +95,7 @@ class WandbTracker:
         self.output_root = output_root
         self.enabled = enabled
         self.run = run
+        self.backend = backend
         self._metadata = metadata
         self._finished = False
         self._network_incomplete = False
@@ -119,6 +121,7 @@ class WandbTracker:
                 output_root=root,
                 enabled=False,
                 run=None,
+                backend=None,
                 metadata=None,
             )
         metadata_path = root / "tracking-metadata.json"
@@ -161,6 +164,7 @@ class WandbTracker:
             output_root=root,
             enabled=True,
             run=run,
+            backend=backend,
             metadata=metadata,
         )
 
@@ -190,6 +194,7 @@ class WandbTracker:
                 output_root=root,
                 enabled=False,
                 run=None,
+                backend=None,
                 metadata=None,
             )
         metadata_path = root / "tracking-metadata.json"
@@ -227,6 +232,7 @@ class WandbTracker:
             output_root=root,
             enabled=True,
             run=run,
+            backend=backend,
             metadata=active,
         )
 
@@ -318,6 +324,82 @@ class WandbTracker:
             actual_sync = False
         self._update_metadata(sync_complete=actual_sync)
         self._finished = True
+
+    def log_evaluation_media(
+        self,
+        rows: Sequence[Mapping[str, object]],
+        video_paths: Sequence[str | Path],
+        *,
+        optimizer_step: int,
+    ) -> None:
+        if not self.enabled:
+            return
+        if self._finished:
+            raise RuntimeError("W&B tracker is already finished")
+        if optimizer_step != self.last_optimizer_step:
+            raise ValueError("W&B media must use the current optimizer step")
+        values = tuple(rows)
+        paths = tuple(Path(path) for path in video_paths)
+        if len(values) != 10 or len(paths) != 10:
+            raise ValueError("W&B evaluation media requires ten rows and videos")
+        columns = (
+            "seed",
+            "success",
+            "total_reward",
+            "episode_length",
+            "consistency_mean",
+            "inverse_variance_mean",
+            "total_nfe",
+            "record_sha256",
+            "video_sha256",
+        )
+        if any(set(row) != set(columns) for row in values):
+            raise ValueError("W&B evaluation table fields do not match contract")
+        if any(path.is_symlink() or not path.is_file() for path in paths):
+            raise ValueError("W&B evaluation videos must be physical files")
+        table_factory = getattr(self.backend, "Table", None)
+        video_factory = getattr(self.backend, "Video", None)
+        if not callable(table_factory) or not callable(video_factory):
+            raise ValueError("W&B backend lacks Table/Video support")
+        table = table_factory(columns=list(columns))
+        for row in sorted(values, key=lambda item: item["seed"]):
+            table.add_data(*(row[column] for column in columns))
+        videos = [
+            video_factory(str(path), caption=path.stem)
+            for path in paths
+        ]
+        try:
+            self.run.log(
+                {
+                    "evaluation/episodes": table,
+                    "evaluation/videos": videos,
+                },
+                step=optimizer_step,
+            )
+        except Exception:
+            self._network_incomplete = True
+        self._update_metadata(sync_complete=False)
+
+    def log_gate(
+        self,
+        metrics: Mapping[str, float],
+        *,
+        optimizer_step: int,
+    ) -> None:
+        if not self.enabled:
+            return
+        if self._finished:
+            raise RuntimeError("W&B tracker is already finished")
+        if optimizer_step != self.last_optimizer_step:
+            raise ValueError("W&B gate must use the current optimizer step")
+        values = _validate_metrics(metrics)
+        if any(not name.startswith("gate/") for name in values):
+            raise ValueError("W&B gate metrics require gate/ prefix")
+        try:
+            self.run.log(values, step=optimizer_step)
+        except Exception:
+            self._network_incomplete = True
+        self._update_metadata(sync_complete=False)
 
     def record_external_sync_success(self) -> None:
         if not self.enabled:

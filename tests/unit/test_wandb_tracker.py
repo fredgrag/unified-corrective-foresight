@@ -38,12 +38,27 @@ class FakeRun:
         self.finished = True
 
 
+class FakeTable:
+    def __init__(self, *, columns: list[str]) -> None:
+        self.columns = columns
+        self.rows: list[tuple[object, ...]] = []
+
+    def add_data(self, *values: object) -> None:
+        self.rows.append(values)
+
+
 class FakeWandb:
     def __init__(self) -> None:
         self.init_calls = 0
         self.last_resume: str | None = None
         self.init_kwargs: list[dict[str, object]] = []
         self.runs: list[FakeRun] = []
+
+    Table = staticmethod(FakeTable)
+
+    @staticmethod
+    def Video(path: str, *, caption: str):
+        return {"path": path, "caption": caption}
 
     def init(self, **kwargs: object) -> FakeRun:
         self.init_calls += 1
@@ -291,6 +306,53 @@ class WandbTrackerTest(unittest.TestCase):
         self.assertEqual(step, 10)
         self.assertIn("learning_rate/action", metrics)
         self.assertIn("pre_clip_gradient_norm", metrics)
+
+    def test_evaluation_media_logs_exactly_ten_rows_and_videos(self) -> None:
+        tracker = WandbTracker.start(
+            config=tracking_config(),
+            rank=0,
+            backend=self.backend,
+            output_root=self.root,
+        )
+        tracker.log({"evaluation/success_rate": 0.5}, optimizer_step=5000)
+        columns = (
+            "seed",
+            "success",
+            "total_reward",
+            "episode_length",
+            "consistency_mean",
+            "inverse_variance_mean",
+            "total_nfe",
+            "record_sha256",
+            "video_sha256",
+        )
+        rows = []
+        videos = []
+        for seed in range(10):
+            rows.append(
+                {
+                    name: (
+                        seed
+                        if name == "seed"
+                        else False
+                        if name == "success"
+                        else "a" * 64
+                        if name.endswith("sha256")
+                        else 1.0
+                    )
+                    for name in columns
+                }
+            )
+            video = self.root / f"seed-{seed}.mp4"
+            video.write_bytes(b"video")
+            videos.append(video)
+
+        tracker.log_evaluation_media(rows, videos, optimizer_step=5000)
+
+        payload, step = self.backend.runs[-1].logged[-1]
+        self.assertEqual(step, 5000)
+        self.assertEqual(len(payload["evaluation/episodes"].rows), 10)
+        self.assertEqual(len(payload["evaluation/videos"]), 10)
 
 
 if __name__ == "__main__":

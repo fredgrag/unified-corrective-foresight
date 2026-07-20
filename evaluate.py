@@ -9,6 +9,9 @@ from typing import Iterator, Sequence
 import torch
 
 from corrective_foresight.config.conflict_fix import load_conflict_fix_config
+from corrective_foresight.evaluation.conflict_fix_report import (
+    validate_policy_label,
+)
 from corrective_foresight.evaluation.maniskill_runner import (
     CheckpointProvenance,
     EvaluationProtocol,
@@ -164,6 +167,7 @@ def main() -> None:
     output_root = args.output_root or evaluation.output_root
     if args.conflict_fix_config is not None:
         conflict_fix = load_conflict_fix_config(args.conflict_fix_config)
+        validate_policy_label(args.tag)
         if tuple(args.seeds) != conflict_fix.evaluation_seeds:
             raise ValueError(
                 "tracked conflict-fix evaluation requires seeds 0 through 9"
@@ -245,6 +249,37 @@ def main() -> None:
         if tracking is not None:
             tracking.log(
                 evaluation_tracking_metrics(records),
+                optimizer_step=args.optimizer_step,
+            )
+            rows = []
+            videos = []
+            for record in records:
+                value = record.value
+                seed = value["environment"]["seed"]
+                record_path = output_root / args.tag / f"seed-{seed}.json"
+                rows.append(
+                    {
+                        "seed": seed,
+                        "success": value["result"]["success"],
+                        "total_reward": value["result"]["total_reward"],
+                        "episode_length": value["result"]["length"],
+                        "consistency_mean": value["diagnostics"][
+                            "consistency_mean"
+                        ],
+                        "inverse_variance_mean": value["diagnostics"][
+                            "inverse_variance_mean"
+                        ],
+                        "total_nfe": value["flow"]["total_nfe"],
+                        "record_sha256": hashlib.sha256(
+                            record_path.read_bytes()
+                        ).hexdigest(),
+                        "video_sha256": value["video"]["sha256"],
+                    }
+                )
+                videos.append(value["video"]["path"])
+            tracking.log_evaluation_media(
+                rows,
+                videos,
                 optimizer_step=args.optimizer_step,
             )
         completed = True

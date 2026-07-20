@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 from pathlib import Path
 
 from corrective_foresight.config.conflict_fix import ConflictFixConfig
@@ -10,6 +11,7 @@ from corrective_foresight.training.gates import (
     read_unified_gate_report,
     read_world_gate_report,
 )
+from corrective_foresight.tracking.wandb_tracker import TrackingMetadata
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +145,19 @@ def resolve_conflict_fix_phase(
     tracking_metadata = unified_output / "tracking-metadata.json"
     if tracking_metadata.is_symlink() or not tracking_metadata.is_file():
         raise ValueError("unified continuation requires tracking metadata")
+    try:
+        metadata = TrackingMetadata.from_mapping(
+            json.loads(tracking_metadata.read_text(encoding="utf-8"))
+        )
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError("unified continuation tracking metadata is invalid") from error
+    if (
+        not metadata.sync_complete
+        or metadata.last_optimizer_step != 5000
+        or metadata.project != config.tracking.project
+        or metadata.group != config.tracking.group
+    ):
+        raise ValueError("unified continuation tracking is not synchronized")
     try:
         unified_gate = read_unified_gate_report(
             root / "unified-gate-report.json"

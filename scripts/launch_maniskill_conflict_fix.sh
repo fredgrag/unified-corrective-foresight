@@ -9,6 +9,11 @@ source scripts/runtime_env.sh
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export CUDA_VISIBLE_DEVICES="0,1,2,3"
+REQUESTED_PHASE="${UCF_CONFLICT_FIX_PHASE:-all}"
+if [[ "${REQUESTED_PHASE}" != "all" && "${REQUESTED_PHASE}" != "world_pretrain" ]]; then
+  echo "UCF_CONFLICT_FIX_PHASE must be all or world_pretrain" >&2
+  exit 2
+fi
 
 OUTPUT_ROOT="$("${UCF_PYTHON_BIN_RESOLVED}" -c \
   'from corrective_foresight.config.conflict_fix import load_conflict_fix_config; import sys; print(load_conflict_fix_config(sys.argv[1]).output_root)' \
@@ -53,6 +58,36 @@ record = ValidationRecord(**value)
 write_world_gate_report(destination, assess_world_gate(record))
 PY
 
+"${UCF_PYTHON_BIN_RESOLVED}" - "${CONFLICT_CONFIG}" "${WORLD_GATE}" <<'PY'
+from corrective_foresight.config.conflict_fix import load_conflict_fix_config
+from corrective_foresight.training.gates import read_world_gate_report
+from corrective_foresight.tracking.wandb_tracker import WandbTracker
+from pathlib import Path
+import hashlib
+import sys
+config = load_conflict_fix_config(sys.argv[1])
+gate_path = Path(sys.argv[2])
+gate = read_world_gate_report(gate_path)
+tracker = WandbTracker.resume(
+    config=config.tracking,
+    rank=0,
+    output_root=config.output_root / "world_pretrain",
+    job_type="world_pretrain",
+    sanitized_run_config={
+        "world_gate_sha256": hashlib.sha256(gate_path.read_bytes()).hexdigest()
+    },
+)
+tracker.log_gate(
+    {
+        "gate/accepted": float(gate.accepted),
+        "gate/requires_approval": float(gate.requires_approval),
+        "gate/improvement_vs_copy_last": gate.improvement_vs_copy_last,
+    },
+    optimizer_step=5000,
+)
+tracker.finish(sync_complete=True)
+PY
+
 "${UCF_PYTHON_BIN_RESOLVED}" - "${WORLD_GATE}" <<'PY'
 from corrective_foresight.training.gates import read_world_gate_report
 import sys
@@ -60,6 +95,11 @@ result = read_world_gate_report(sys.argv[1])
 if not result.accepted:
     raise SystemExit(f"world gate did not pass: {result.outcome}")
 PY
+
+if [[ "${REQUESTED_PHASE}" == "world_pretrain" ]]; then
+  echo "world-pretraining phase and gate completed; audit was not started" >&2
+  exit 0
+fi
 
 "${TORCHRUN[@]}" train.py \
   --conflict-fix-config "${CONFLICT_CONFIG}" \
@@ -103,6 +143,36 @@ decision = decide_gradient_audit(
 write_audit_decision(destination, decision)
 PY
 
+"${UCF_PYTHON_BIN_RESOLVED}" - "${CONFLICT_CONFIG}" "${AUDIT_DECISION}" <<'PY'
+from corrective_foresight.config.conflict_fix import load_conflict_fix_config
+from corrective_foresight.training.gates import read_audit_decision
+from corrective_foresight.tracking.wandb_tracker import WandbTracker
+from pathlib import Path
+import hashlib
+import sys
+config = load_conflict_fix_config(sys.argv[1])
+decision_path = Path(sys.argv[2])
+decision = read_audit_decision(decision_path)
+tracker = WandbTracker.resume(
+    config=config.tracking,
+    rank=0,
+    output_root=config.output_root / "gradient_audit",
+    job_type="gradient_audit",
+    sanitized_run_config={
+        "audit_decision_sha256": hashlib.sha256(decision_path.read_bytes()).hexdigest()
+    },
+)
+tracker.log_gate(
+    {
+        "gate/enable_pcgrad": float(decision.enable_pcgrad),
+        "gate/conflict_fraction": decision.conflict_fraction,
+        "gate/dynamics_ratio": decision.dynamics_ratio,
+    },
+    optimizer_step=500,
+)
+tracker.finish(sync_complete=True)
+PY
+
 "${TORCHRUN[@]}" train.py \
   --conflict-fix-config "${CONFLICT_CONFIG}" \
   --conflict-fix-phase unified_gate \
@@ -125,6 +195,11 @@ for name, metadata in manifest.value["files"].items():
     if hashlib.sha256(payload.read_bytes()).hexdigest() != metadata["sha256"]:
         raise SystemExit(f"checkpoint hash mismatch: {name}")
 PY
+
+"${TORCHRUN[@]}" scripts/verify_conflict_fix_resume.py \
+  --conflict-fix-config "${CONFLICT_CONFIG}" \
+  --checkpoint "${UNIFIED_CHECKPOINT}" \
+  --audit-decision "${AUDIT_DECISION}"
 
 scripts/evaluate_maniskill_conflict_fix.sh "${CONFLICT_CONFIG}"
 

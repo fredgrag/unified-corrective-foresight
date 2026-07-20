@@ -148,7 +148,20 @@ class ConflictFixOrchestrationTest(unittest.TestCase):
         checkpoint.mkdir(parents=True)
         (checkpoint / "manifest.json").write_text("{}\n", encoding="utf-8")
         (unified_root / "tracking-metadata.json").write_text(
-            "{}\n",
+            json.dumps(
+                {
+                    "format_version": 1,
+                    "entity": "test",
+                    "project": "unified-corrective-foresight",
+                    "group": "maniskill-pickcube-conflict-fix-v2",
+                    "run_id": "run-test",
+                    "mode": "online",
+                    "last_optimizer_step": 5000,
+                    "sync_complete": True,
+                },
+                sort_keys=True,
+            )
+            + "\n",
             encoding="utf-8",
         )
 

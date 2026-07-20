@@ -3,6 +3,10 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PILOT_CONFIG="${1:-${PROJECT_ROOT}/configs/pilots/maniskill_stable_v1.yaml}"
+if [[ "$(basename -- "${PILOT_CONFIG}")" == "maniskill_conflict_fix_v2.yaml" ]]; then
+  echo "use scripts/evaluate_maniskill_conflict_fix.sh for conflict-fix runs" >&2
+  exit 2
+fi
 cd "${PROJECT_ROOT}"
 source scripts/runtime_env.sh
 export HF_HUB_OFFLINE=1
