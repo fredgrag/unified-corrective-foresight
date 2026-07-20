@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import hashlib
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Sequence
 
 import torch
 
+from corrective_foresight.config.conflict_fix import load_conflict_fix_config
 from corrective_foresight.evaluation.maniskill_runner import (
     CheckpointProvenance,
     EvaluationProtocol,
@@ -26,6 +28,7 @@ from corrective_foresight.training.distributed_checkpoint import (
     load_distributed_policy_checkpoint_for_evaluation,
 )
 from corrective_foresight.training.run_manifest import RunManifest
+from corrective_foresight.tracking.wandb_tracker import WandbTracker
 
 
 def flow_seed_stream(base_seed: int, environment_seed: int) -> Iterator[int]:
@@ -41,7 +44,7 @@ def flow_seed_stream(base_seed: int, environment_seed: int) -> Iterator[int]:
         yield int(torch.randint(0, 2**31 - 1, (1,), generator=generator).item())
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
@@ -49,7 +52,57 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tag", required=True)
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--output-root", type=Path)
-    return parser.parse_args()
+    parser.add_argument("--conflict-fix-config", type=Path)
+    parser.add_argument("--optimizer-step", type=int)
+    args = parser.parse_args(argv)
+    if (args.conflict_fix_config is None) != (args.optimizer_step is None):
+        parser.error(
+            "--conflict-fix-config and --optimizer-step must be provided together"
+        )
+    if args.optimizer_step is not None and args.optimizer_step < 0:
+        parser.error("--optimizer-step must be nonnegative")
+    return args
+
+
+def evaluation_tracking_metrics(records: Sequence[object]) -> dict[str, float]:
+    values = tuple(records)
+    if not values:
+        raise ValueError("evaluation tracking requires episode records")
+    payloads: list[dict[str, object]] = []
+    for record in values:
+        value = getattr(record, "value", None)
+        if not isinstance(value, dict):
+            raise ValueError("evaluation tracking records are invalid")
+        payloads.append(value)
+    count = len(payloads)
+    return {
+        "evaluation/success_rate": sum(
+            float(bool(value["result"]["success"])) for value in payloads
+        )
+        / count,
+        "evaluation/reward_mean": sum(
+            float(value["result"]["total_reward"]) for value in payloads
+        )
+        / count,
+        "evaluation/episode_length_mean": sum(
+            float(value["result"]["length"]) for value in payloads
+        )
+        / count,
+        "evaluation/consistency_mean": sum(
+            float(value["diagnostics"]["consistency_mean"])
+            for value in payloads
+        )
+        / count,
+        "evaluation/inverse_variance_mean": sum(
+            float(value["diagnostics"]["inverse_variance_mean"])
+            for value in payloads
+        )
+        / count,
+        "evaluation/nfe_mean": sum(
+            float(value["flow"]["total_nfe"]) for value in payloads
+        )
+        / count,
+    }
 
 
 def main() -> None:
@@ -107,6 +160,35 @@ def main() -> None:
         device=device,
     )
 
+    tracking = None
+    output_root = args.output_root or evaluation.output_root
+    if args.conflict_fix_config is not None:
+        conflict_fix = load_conflict_fix_config(args.conflict_fix_config)
+        if tuple(args.seeds) != conflict_fix.evaluation_seeds:
+            raise ValueError(
+                "tracked conflict-fix evaluation requires seeds 0 through 9"
+            )
+        tracking_root = output_root / args.tag
+        if tracking_root.is_symlink():
+            raise ValueError("evaluation tracking root cannot be a symlink")
+        tracking_root.mkdir(parents=True, exist_ok=True)
+        tracking = WandbTracker.start(
+            config=conflict_fix.tracking,
+            rank=0,
+            output_root=tracking_root,
+            job_type="closed_loop_eval",
+            sanitized_run_config={
+                "pilot_id": conflict_fix.pilot_id,
+                "optimizer_step": args.optimizer_step,
+                "tag": args.tag,
+                "seeds": list(args.seeds),
+                "checkpoint_manifest_sha256": manifest_hash,
+                "dataset_spec_hash": dataset_spec.content_hash,
+                "action_spec_hash": action_spec.content_hash,
+                "evaluation": asdict(evaluation),
+            },
+        )
+
     from corrective_foresight.data.maniskill_conversion import make_pick_cube_rgb_env
 
     runner = ManiSkillClosedLoopRunner(
@@ -141,21 +223,34 @@ def main() -> None:
             solver_intervals=evaluation.solver_intervals,
             context_steps=evaluation.context_steps,
         ),
-        output_root=args.output_root or evaluation.output_root,
+        output_root=output_root,
         max_steps=max_steps,
         action_to_environment=physical_action_to_maniskill_controller,
     )
-    for seed in args.seeds:
-        record = runner.run_episode(
-            seed,
-            flow_seed_stream(runtime.config.seed, seed),
-            tag=args.tag,
-        )
-        result = record.value["result"]
-        print(
-            f"seed={seed} success={result['success']} length={result['length']} "
-            f"video_sha256={record.value['video']['sha256']}"
-        )
+    records = []
+    completed = False
+    try:
+        for seed in args.seeds:
+            record = runner.run_episode(
+                seed,
+                flow_seed_stream(runtime.config.seed, seed),
+                tag=args.tag,
+            )
+            records.append(record)
+            result = record.value["result"]
+            print(
+                f"seed={seed} success={result['success']} length={result['length']} "
+                f"video_sha256={record.value['video']['sha256']}"
+            )
+        if tracking is not None:
+            tracking.log(
+                evaluation_tracking_metrics(records),
+                optimizer_step=args.optimizer_step,
+            )
+        completed = True
+    finally:
+        if tracking is not None:
+            tracking.finish(sync_complete=completed)
 
 
 if __name__ == "__main__":

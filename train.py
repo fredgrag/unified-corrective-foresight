@@ -4,9 +4,11 @@ import argparse
 from dataclasses import asdict
 from collections.abc import Callable
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
+import time
 from typing import Protocol
 
 import torch
@@ -42,6 +44,7 @@ from corrective_foresight.training.pilot import PilotController
 from corrective_foresight.training.stages import TrainingStage
 from corrective_foresight.training.trainer import Trainer, TrainerConfig, TrainStepResult
 from corrective_foresight.training.validation import ValidationConfig, ValidationRunner
+from corrective_foresight.tracking.wandb_tracker import WandbTracker
 
 
 class BatchSource(Protocol):
@@ -80,6 +83,7 @@ def run_training(
     metric_logger: MetricLogger,
     flow_generator: torch.Generator | None = None,
     optimizer_step_callback: OptimizerStepCallback | None = None,
+    wandb_tracker: WandbTracker | None = None,
 ) -> int:
     stage = TrainingStage.parse(stage)
     if type(optimizer_steps) is not int or optimizer_steps <= 0:
@@ -92,6 +96,11 @@ def run_training(
         raise ValueError("metric_logger must be callable")
     if optimizer_step_callback is not None and not callable(optimizer_step_callback):
         raise ValueError("optimizer_step_callback must be callable")
+    if wandb_tracker is not None and not isinstance(
+        wandb_tracker,
+        WandbTracker,
+    ):
+        raise ValueError("wandb_tracker must be WandbTracker")
     device = trainer.distributed_context.device
     if flow_generator is None:
         generator = torch.Generator(device=device).manual_seed(generator_seed)
@@ -101,6 +110,9 @@ def run_training(
         generator = flow_generator
     global_step = start_global_step
     final_step = start_global_step + optimizer_steps
+    optimizer_step_started = time.perf_counter()
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
     while global_step < final_step:
         batch = batch_source.next_batch().to(device)
         result = trainer.train_step(
@@ -115,6 +127,7 @@ def run_training(
             "stage": stage.value,
             "dataset_id": batch.dataset_id,
             "global_step": global_step,
+            "optimizer_step": global_step + 1,
             "learning_rate": result.learning_rate,
             "pre_clip_gradient_norm": float(
                 result.pre_clip_gradient_norm.item()
@@ -136,7 +149,44 @@ def run_training(
             }
         )
         record.update(result.gradient_metrics)
+        elapsed = time.perf_counter() - optimizer_step_started
+        if not math.isfinite(elapsed) or elapsed <= 0.0:
+            raise ValueError("optimizer step duration must be finite and positive")
+        global_samples = (
+            int(batch.rgb.shape[0])
+            * trainer.distributed_context.world_size
+            * trainer.config.accumulation_steps
+        )
+        pre_clip_norm = float(result.pre_clip_gradient_norm.item())
+        clip_coefficient = min(
+            1.0,
+            trainer.config.max_grad_norm / max(pre_clip_norm, 1e-12),
+        )
+        record.update(
+            {
+                "optimizer_step_time_seconds": elapsed,
+                "samples_per_second": global_samples / elapsed,
+                "peak_gpu_memory_bytes": (
+                    float(torch.cuda.max_memory_allocated(device))
+                    if device.type == "cuda"
+                    else 0.0
+                ),
+                "gradient_clip/coefficient": clip_coefficient,
+                "gradient_clip/frequency": float(clip_coefficient < 1.0),
+            }
+        )
         metric_logger(record)
+        optimizer_step = global_step + 1
+        if wandb_tracker is not None:
+            wandb_tracker.log_distributed(
+                {
+                    name: float(value)
+                    for name, value in record.items()
+                    if isinstance(value, (int, float))
+                },
+                optimizer_step=optimizer_step,
+                context=trainer.distributed_context,
+            )
         global_step += 1
         if optimizer_step_callback is not None:
             decision = optimizer_step_callback(global_step, result)
@@ -149,6 +199,9 @@ def run_training(
                 )
             if decision is not None and decision.should_stop:
                 break
+        optimizer_step_started = time.perf_counter()
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
     return global_step
 
 

@@ -17,6 +17,7 @@ dependencies = [
   "torchcodec==0.7.0",
   "torchvision==0.23.0",
   "transformers==5.3.0",
+  "wandb==0.24.2",
 ]
 
 [project.optional-dependencies]
