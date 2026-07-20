@@ -1,0 +1,48 @@
+schema_version: 1
+experiment_id: maniskill.pick_cube.unified.conflict_fix.v2
+stage: unified
+seed: 20260720
+model_config: configs/model/unified_base.yaml
+dataset_specs:
+- configs/datasets/maniskill_pick_cube_v1.yaml
+action_specs:
+- configs/actions/maniskill_panda_pd_ee_delta_pose_physical_v1.yaml
+task_texts:
+  maniskill.pick_cube.panda_wristcam.v1:
+  - Pick the red cube and place it at the green goal.
+artifacts:
+  dinov3_snapshot: /mnt/workspace/wwl/corrective-foresight/unified_corrective_foresight/artifacts/models/facebook/dinov3-vitb16-pretrain-lvd1689m/23d0280ae6ee4ced592a3459674ad027d3c18906
+  language_tensor: /mnt/workspace/wwl/corrective-foresight/unified_corrective_foresight/artifacts/conditioning/maniskill_pick_cube_clip.safetensors
+  language_metadata: /mnt/workspace/wwl/corrective-foresight/unified_corrective_foresight/artifacts/conditioning/maniskill_pick_cube_clip.json
+output_root: /mnt/workspace/wwl/corrective-foresight/unified_corrective_foresight/artifacts/runs/maniskill_conflict_fix_v2/unified
+training:
+  batch_size_per_rank: 2
+  accumulation_steps: 8
+  learning_rate: 0.00005
+  weight_decay: 0.05
+  max_grad_norm: 1.0
+  warmup_steps: 500
+  total_steps: 20000
+  checkpoint_interval: 1000
+  validation_interval: 250
+  ema_tau: 0.999
+  bf16: true
+optimized_objectives:
+  dynamics_loss: 1.0
+  inverse_loss: 1.0
+  action_cycle_loss: 0.1
+  policy_flow_loss: 1.0
+evaluation:
+  env_id: PickCube-v1
+  robot_uid: panda_wristcam
+  obs_mode: rgb
+  control_mode: pd_ee_delta_pose
+  sim_backend: physx_cpu
+  context_steps: 2
+  action_horizon: 8
+  execution_horizon: 1
+  temporal_ensemble: false
+  solver: midpoint
+  solver_intervals: 10
+  max_steps: 200
+  output_root: /mnt/workspace/wwl/corrective-foresight/unified_corrective_foresight/artifacts/runs/maniskill_conflict_fix_v2/evaluations

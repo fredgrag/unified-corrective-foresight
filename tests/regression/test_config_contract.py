@@ -17,7 +17,12 @@ class ConfigContractTest(unittest.TestCase):
         paths = tuple(sorted(EXPERIMENT_ROOT.glob("*.yaml")))
         self.assertEqual(
             {path.name for path in paths},
-            {"maniskill_unified.yaml", "maniskill_world_pretrain.yaml"},
+            {
+                "maniskill_unified.yaml",
+                "maniskill_unified_conflict_fix.yaml",
+                "maniskill_world_pretrain.yaml",
+                "maniskill_world_pretrain_conflict_fix.yaml",
+            },
         )
         for path in paths:
             with self.subTest(path=path.name):
@@ -48,6 +53,25 @@ class ConfigContractTest(unittest.TestCase):
                     {spec.content_hash for spec in action_specs},
                     {"13c05454f557d69af8f4ceab9a40318bda1203b513d6b25ee7e1c0c10a1c1000"},
                 )
+
+    def test_conflict_fix_training_schedules_are_exact(self) -> None:
+        world = load_experiment_config(
+            EXPERIMENT_ROOT / "maniskill_world_pretrain_conflict_fix.yaml"
+        )
+        unified = load_experiment_config(
+            EXPERIMENT_ROOT / "maniskill_unified_conflict_fix.yaml"
+        )
+
+        self.assertEqual(world.training.learning_rate, 1e-4)
+        self.assertEqual(world.training.warmup_steps, 500)
+        self.assertEqual(world.training.total_steps, 5000)
+        self.assertEqual(world.training.checkpoint_interval, 1000)
+        self.assertEqual(world.training.validation_interval, 250)
+        self.assertEqual(unified.training.learning_rate, 5e-5)
+        self.assertEqual(unified.training.warmup_steps, 500)
+        self.assertEqual(unified.training.total_steps, 20000)
+        self.assertEqual(unified.training.checkpoint_interval, 1000)
+        self.assertEqual(unified.training.validation_interval, 250)
 
     def test_stage_objective_whitelists_are_exact(self) -> None:
         world = load_experiment_config(

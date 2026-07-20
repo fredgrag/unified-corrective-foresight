@@ -1,0 +1,27 @@
+schema_version: 1
+pilot_id: maniskill.pick_cube.conflict_fix.v2
+world_experiment: configs/experiments/maniskill_world_pretrain_conflict_fix.yaml
+unified_experiment: configs/experiments/maniskill_unified_conflict_fix.yaml
+world_steps: 5000
+audit_steps: 500
+unified_gate_steps: 5000
+unified_total_steps: 20000
+validation_interval: 250
+checkpoint_interval: 1000
+validation_batches_per_rank: 8
+protected_lr_multiplier: 0.1
+conflict_log_interval: 10
+conflict_cosine_threshold: -0.05
+conflict_measurement_minimum: 8
+dynamics_degradation_ratio: 1.2
+world_copy_improvement_target: 0.05
+required_success_gain: 2
+evaluation_seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+gpu_indices: [0, 1, 2, 3]
+output_root: /mnt/workspace/wwl/corrective-foresight/unified_corrective_foresight/artifacts/runs/maniskill_conflict_fix_v2
+tracking:
+  enabled: true
+  project: unified-corrective-foresight
+  group: maniskill-pickcube-conflict-fix-v2
+  log_interval: 10
+  upload_checkpoints: false
