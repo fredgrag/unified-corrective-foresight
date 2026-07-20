@@ -23,7 +23,7 @@ class ConflictFixConfigTest(unittest.TestCase):
         self.assertEqual(config.validation_interval, 250)
         self.assertEqual(config.checkpoint_interval, 1000)
         self.assertEqual(config.validation_batches_per_rank, 8)
-        self.assertEqual(config.protected_lr_multiplier, 0.1)
+        self.assertEqual(config.protected_lr_multiplier, 0.0)
         self.assertEqual(config.conflict_log_interval, 10)
         self.assertEqual(config.conflict_cosine_threshold, -0.05)
         self.assertEqual(config.conflict_measurement_minimum, 8)

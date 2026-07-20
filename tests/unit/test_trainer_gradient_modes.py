@@ -69,6 +69,53 @@ class TrainerGradientModesTest(unittest.TestCase):
             5e-5,
         )
 
+    def test_zero_protected_lr_freezes_world_and_ema_but_updates_action(self) -> None:
+        trainer = make_mode_trainer(
+            gradient_mode="pcgrad",
+            protected_lr_multiplier=0.0,
+        )
+        protected_before = tuple(
+            parameter.detach().clone()
+            for parameter in trainer.parameter_groups.protected
+        )
+        action_before = tuple(
+            parameter.detach().clone()
+            for parameter in trainer.parameter_groups.action
+        )
+        ema_before = {
+            name: value.detach().clone()
+            for name, value in trainer.policy.ema_state_target.state_dict().items()
+        }
+        ema_step_before = trainer.policy.last_ema_step
+
+        result = run_optimizer_steps(trainer, 1)[0]
+
+        self.assertEqual(result.learning_rates["protected"], 0.0)
+        for before, after in zip(
+            protected_before,
+            trainer.parameter_groups.protected,
+            strict=True,
+        ):
+            torch.testing.assert_close(after, before, rtol=0.0, atol=0.0)
+        self.assertTrue(
+            any(
+                not torch.equal(before, after)
+                for before, after in zip(
+                    action_before,
+                    trainer.parameter_groups.action,
+                    strict=True,
+                )
+            )
+        )
+        for name, before in ema_before.items():
+            torch.testing.assert_close(
+                trainer.policy.ema_state_target.state_dict()[name],
+                before,
+                rtol=0.0,
+                atol=0.0,
+            )
+        self.assertEqual(trainer.policy.last_ema_step, ema_step_before)
+
     def test_audit_logs_only_on_tenth_optimizer_step(self) -> None:
         trainer = make_mode_trainer(
             gradient_mode="audit",
@@ -139,7 +186,7 @@ class TrainerGradientModesTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "protected_lr_multiplier"):
             make_mode_trainer(
                 gradient_mode="audit",
-                protected_lr_multiplier=0.0,
+                protected_lr_multiplier=-0.1,
             )
         with self.assertRaisesRegex(ValueError, "world_pretrain"):
             TrainerConfig(

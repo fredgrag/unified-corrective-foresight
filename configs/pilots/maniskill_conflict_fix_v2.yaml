@@ -9,7 +9,7 @@ unified_total_steps: 20000
 validation_interval: 250
 checkpoint_interval: 1000
 validation_batches_per_rank: 8
-protected_lr_multiplier: 0.1
+protected_lr_multiplier: 0.0
 conflict_log_interval: 10
 conflict_cosine_threshold: -0.05
 conflict_measurement_minimum: 8

@@ -76,10 +76,10 @@ class TrainerConfig:
         TrainingStage.parse(self.stage)
         if (
             not math.isfinite(self.protected_lr_multiplier)
-            or not 0.0 < self.protected_lr_multiplier <= 1.0
+            or not 0.0 <= self.protected_lr_multiplier <= 1.0
         ):
             raise ValueError(
-                "protected_lr_multiplier must be finite within (0, 1]"
+                "protected_lr_multiplier must be finite within [0, 1]"
             )
         if self.gradient_mode not in {"ordinary", "audit", "pcgrad"}:
             raise ValueError(
@@ -340,7 +340,8 @@ class Trainer:
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.scheduler.step()
-            self.policy.update_ema(global_step)
+            if self.config.protected_lr_multiplier > 0.0:
+                self.policy.update_ema(global_step)
         except Exception:
             if self._gradient_accumulator is not None:
                 self._gradient_accumulator.reset()

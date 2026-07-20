@@ -152,7 +152,7 @@ def load_conflict_fix_config(path: str | Path) -> ConflictFixConfig:
         )
     }
     approved_finite = {
-        "protected_lr_multiplier": 0.1,
+        "protected_lr_multiplier": 0.0,
         "conflict_cosine_threshold": -0.05,
         "dynamics_degradation_ratio": 1.2,
         "world_copy_improvement_target": 0.05,
