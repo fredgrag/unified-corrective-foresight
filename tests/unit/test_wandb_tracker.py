@@ -26,6 +26,7 @@ class FakeRun:
         self.id = run_id
         self.entity = "test-entity"
         self.logged: list[tuple[dict[str, float], int]] = []
+        self.summary: dict[str, float] = {}
         self.finished = False
         self.fail_logging = False
 
@@ -196,6 +197,34 @@ class WandbTrackerTest(unittest.TestCase):
                 {"validation/dynamics_loss": 0.09},
                 optimizer_step=251,
             )
+
+    def test_gate_updates_terminal_summary_without_reusing_history_step(self) -> None:
+        tracker = WandbTracker.start(
+            config=tracking_config(),
+            rank=0,
+            backend=self.backend,
+            output_root=self.root,
+        )
+        tracker.log({"train/loss": 1.0}, optimizer_step=5000)
+
+        tracker.log_gate(
+            {
+                "gate/accepted": 1.0,
+                "gate/improvement_vs_copy_last": 0.43,
+            },
+            optimizer_step=5000,
+        )
+
+        run = self.backend.runs[-1]
+        self.assertEqual(run.logged, [({"train/loss": 1.0}, 5000)])
+        self.assertEqual(
+            run.summary,
+            {
+                "gate/accepted": 1.0,
+                "gate/improvement_vs_copy_last": 0.43,
+            },
+        )
+        self.assertEqual(tracker.last_optimizer_step, 5000)
 
     def test_log_updates_metadata_and_network_failure_does_not_raise(self) -> None:
         tracker = WandbTracker.start(

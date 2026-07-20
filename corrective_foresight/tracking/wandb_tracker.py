@@ -396,7 +396,7 @@ class WandbTracker:
         if any(not name.startswith("gate/") for name in values):
             raise ValueError("W&B gate metrics require gate/ prefix")
         try:
-            self.run.log(values, step=optimizer_step)
+            self.run.summary.update(values)
         except Exception:
             self._network_incomplete = True
         self._update_metadata(sync_complete=False)
