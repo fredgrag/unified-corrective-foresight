@@ -125,6 +125,13 @@ def run_training(
                 for name, value in result.per_loss_gradient_norms.items()
             }
         )
+        record.update(
+            {
+                f"learning_rate/{name}": value
+                for name, value in result.learning_rates.items()
+            }
+        )
+        record.update(result.gradient_metrics)
         metric_logger(record)
         global_step += 1
         if optimizer_step_callback is not None:

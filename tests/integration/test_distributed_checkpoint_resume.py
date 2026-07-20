@@ -14,6 +14,7 @@ import torch.multiprocessing as mp
 
 from corrective_foresight.data.mixer import BalancedLeRobotMixer
 from corrective_foresight.data.stateful_sampler import StatefulDistributedBatchSampler
+from corrective_foresight.model.objectives import action_cycle_weight
 from corrective_foresight.training.checkpoint import (
     CheckpointState,
     ExpectedCheckpointContract,
@@ -23,6 +24,7 @@ from corrective_foresight.training.distributed_checkpoint import (
     load_distributed_checkpoint_strict,
     save_distributed_checkpoint_atomic,
 )
+from corrective_foresight.training.gradient_conflict import projection_order
 from corrective_foresight.training.stages import TrainingStage
 from corrective_foresight.training.trainer import Trainer, TrainerConfig
 from tests.fixtures.fake_trajectory_dataset import FakeTrajectoryDataset
@@ -50,7 +52,11 @@ class _ConditionedFakeDataset(FakeTrajectoryDataset):
         return replace(sample, task_text=None, condition_ids=condition_ids)
 
 
-def _training_state(rank: int, context: DistributedContext) -> CheckpointState:
+def _training_state(
+    rank: int,
+    context: DistributedContext,
+    gradient_mode: str,
+) -> CheckpointState:
     torch.manual_seed(7001)
     base = make_state()
     base.policy.restore_ema_step(-1)
@@ -59,12 +65,19 @@ def _training_state(rank: int, context: DistributedContext) -> CheckpointState:
         TrainerConfig(
             learning_rate=1e-3,
             weight_decay=0.01,
-            accumulation_steps=1,
+            accumulation_steps=2 if gradient_mode == "pcgrad" else 1,
             max_grad_norm=1.0,
             warmup_steps=0,
             total_steps=10,
             bf16=False,
             ddp=True,
+            stage="unified",
+            protected_lr_multiplier=(
+                0.1 if gradient_mode == "pcgrad" else 1.0
+            ),
+            gradient_mode=gradient_mode,
+            gradient_diagnostic_interval=1,
+            pcgrad_seed=20260720,
         ),
         rank=rank,
         distributed_context=context,
@@ -98,23 +111,46 @@ def _training_state(rank: int, context: DistributedContext) -> CheckpointState:
 def _run_steps(state: CheckpointState, start: int, count: int) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     for step in range(start, start + count):
-        batch = state.mixer.next_batch()
-        result = state.trainer.train_step(
-            batch,
-            TrainingStage.UNIFIED,
-            step,
-            state.flow_generator,
+        micro_batches: list[list[float]] = []
+        while True:
+            batch = state.mixer.next_batch()
+            micro_batches.append(
+                [float(value) for value in batch.proprio[:, 0, 0].tolist()]
+            )
+            result = state.trainer.train_step(
+                batch,
+                TrainingStage.UNIFIED,
+                step,
+                state.flow_generator,
+            )
+            if result.optimizer_stepped:
+                break
+        active_names = tuple(
+            name
+            for name in result.output.losses
+            if name != "action_cycle_loss" or action_cycle_weight(step) > 0.0
         )
         records.append(
             {
                 "dataset_id": batch.dataset_id,
-                "sample_indices": [
-                    float(value) for value in batch.proprio[:, 0, 0].tolist()
-                ],
+                "sample_indices": micro_batches,
                 "metrics": {
                     name: float(value.item())
                     for name, value in sorted(result.output.metrics.items())
                 },
+                "gradient_metrics": dict(sorted(result.gradient_metrics.items())),
+                "learning_rates": dict(sorted(result.learning_rates.items())),
+                "projection_order": (
+                    list(
+                        projection_order(
+                            active_names,
+                            seed=state.trainer.config.pcgrad_seed,
+                            global_step=step,
+                        )
+                    )
+                    if state.trainer.config.gradient_mode == "pcgrad"
+                    else []
+                ),
             }
         )
     return records
@@ -154,6 +190,7 @@ def _exact_resume_worker(
     mode: str,
     checkpoint: str,
     result_directory: str,
+    gradient_mode: str,
 ) -> None:
     dist.init_process_group(
         "gloo",
@@ -166,7 +203,7 @@ def _exact_resume_worker(
             local_rank=rank,
             device="cpu",
         )
-        state = _training_state(rank, context)
+        state = _training_state(rank, context, gradient_mode)
         if mode == "baseline":
             records = _run_steps(state, 0, 4)
         elif mode == "save":
@@ -206,13 +243,21 @@ def _spawn_phase(
     name: str,
     mode: str,
     checkpoint: Path,
+    gradient_mode: str = "ordinary",
 ) -> list[dict[str, object]]:
     rendezvous = directory / f"{name}.rendezvous"
     result_directory = directory / f"{name}.results"
     result_directory.mkdir()
     mp.spawn(
         _exact_resume_worker,
-        args=(2, str(rendezvous), mode, str(checkpoint), str(result_directory)),
+        args=(
+            2,
+            str(rendezvous),
+            mode,
+            str(checkpoint),
+            str(result_directory),
+            gradient_mode,
+        ),
         nprocs=2,
         join=True,
     )
@@ -226,26 +271,35 @@ def _spawn_phase(
 
 class DistributedCheckpointResumeTest(unittest.TestCase):
     def test_fresh_process_resume_matches_uninterrupted_steps(self) -> None:
+        self._assert_exact_resume("ordinary")
+
+    def test_pcgrad_resume_supports_full_microbatch_accumulation(self) -> None:
+        self._assert_exact_resume("pcgrad")
+
+    def _assert_exact_resume(self, gradient_mode: str) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            checkpoint = root / "checkpoint"
+            checkpoint = root / f"{gradient_mode}-checkpoint"
             baseline = _spawn_phase(
                 directory=root,
-                name="baseline",
+                name=f"{gradient_mode}-baseline",
                 mode="baseline",
                 checkpoint=checkpoint,
+                gradient_mode=gradient_mode,
             )
             _spawn_phase(
                 directory=root,
-                name="save",
+                name=f"{gradient_mode}-save",
                 mode="save",
                 checkpoint=checkpoint,
+                gradient_mode=gradient_mode,
             )
             resumed = _spawn_phase(
                 directory=root,
-                name="load",
+                name=f"{gradient_mode}-load",
                 mode="load",
                 checkpoint=checkpoint,
+                gradient_mode=gradient_mode,
             )
             self.assertEqual(len(baseline), 2)
             self.assertEqual(len(resumed), 2)
