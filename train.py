@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import asdict, fields, is_dataclass
+import hashlib
 import json
 import math
 import os
@@ -19,6 +20,9 @@ from corrective_foresight.data.lerobot_adapter import LeRobotTrajectoryAdapter
 from corrective_foresight.data.mixer import BalancedLeRobotMixer
 from corrective_foresight.data.stateful_sampler import StatefulDistributedBatchSampler
 from corrective_foresight.data.batch import TrajectoryBatch
+from corrective_foresight.config.conflict_fix import (
+    load_conflict_fix_config,
+)
 from corrective_foresight.config.pilot import load_pilot_config
 from corrective_foresight.runtime import (
     ProductionRuntime,
@@ -39,11 +43,21 @@ from corrective_foresight.training.distributed_checkpoint import (
     save_distributed_checkpoint_atomic,
 )
 from corrective_foresight.training.distributed import DistributedContext
-from corrective_foresight.training.gates import PilotStepDecision
+from corrective_foresight.training.conflict_fix_phase import (
+    resolve_conflict_fix_phase,
+)
+from corrective_foresight.training.gates import (
+    PilotStepDecision,
+    ValidationStopMonitor,
+)
 from corrective_foresight.training.pilot import PilotController
 from corrective_foresight.training.stages import TrainingStage
 from corrective_foresight.training.trainer import Trainer, TrainerConfig, TrainStepResult
-from corrective_foresight.training.validation import ValidationConfig, ValidationRunner
+from corrective_foresight.training.validation import (
+    ValidationConfig,
+    ValidationRecord,
+    ValidationRunner,
+)
 from corrective_foresight.tracking.wandb_tracker import WandbTracker
 
 
@@ -221,6 +235,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--stage", choices=("world_pretrain", "unified"))
     parser.add_argument("--pilot-config", type=Path)
     parser.add_argument("--pilot-stage", choices=("world_pretrain", "unified"))
+    parser.add_argument("--conflict-fix-config", type=Path)
+    parser.add_argument(
+        "--conflict-fix-phase",
+        choices=(
+            "world_pretrain",
+            "gradient_audit",
+            "unified_gate",
+            "unified_continue",
+        ),
+    )
+    parser.add_argument("--audit-decision", type=Path)
     parser.add_argument("--steps", type=positive_int)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--init-checkpoint", type=Path)
@@ -228,8 +253,74 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--metrics-output", type=Path)
     parser.add_argument("--initialize-only", action="store_true")
     args = parser.parse_args(argv)
-    if (args.config is None) == (args.pilot_config is None):
-        parser.error("exactly one of --config or --pilot-config is required")
+    sources = sum(
+        value is not None
+        for value in (
+            args.config,
+            args.pilot_config,
+            args.conflict_fix_config,
+        )
+    )
+    if sources != 1:
+        parser.error(
+            "exactly one of --config, --pilot-config, or "
+            "--conflict-fix-config is required"
+        )
+    if args.conflict_fix_config is not None:
+        if args.conflict_fix_phase is None:
+            parser.error(
+                "--conflict-fix-phase is required with --conflict-fix-config"
+            )
+        forbidden = {
+            "--stage": args.stage,
+            "--pilot-stage": args.pilot_stage,
+            "--steps": args.steps,
+            "--output-checkpoint": args.output_checkpoint,
+        }
+        used = [name for name, value in forbidden.items() if value is not None]
+        if args.initialize_only:
+            used.append("--initialize-only")
+        if used:
+            parser.error(
+                f"conflict-fix phases forbid schedule overrides: {sorted(used)}"
+            )
+        phase = args.conflict_fix_phase
+        if phase == "world_pretrain":
+            if any(
+                value is not None
+                for value in (
+                    args.init_checkpoint,
+                    args.resume,
+                    args.audit_decision,
+                )
+            ):
+                parser.error("world_pretrain conflict-fix phase must be fresh")
+        elif phase == "gradient_audit":
+            if args.init_checkpoint is None:
+                parser.error("gradient_audit requires --init-checkpoint")
+            if args.resume is not None or args.audit_decision is not None:
+                parser.error(
+                    "gradient_audit forbids --resume and --audit-decision"
+                )
+        elif phase == "unified_gate":
+            if args.init_checkpoint is None or args.audit_decision is None:
+                parser.error(
+                    "unified_gate requires --init-checkpoint and --audit-decision"
+                )
+            if args.resume is not None:
+                parser.error("unified_gate forbids --resume")
+        elif phase == "unified_continue":
+            if args.resume is None or args.audit_decision is None:
+                parser.error(
+                    "unified_continue requires --resume and --audit-decision"
+                )
+            if args.init_checkpoint is not None:
+                parser.error("unified_continue forbids --init-checkpoint")
+    elif args.conflict_fix_phase is not None or args.audit_decision is not None:
+        parser.error(
+            "--conflict-fix-phase/--audit-decision require "
+            "--conflict-fix-config"
+        )
     if args.pilot_config is not None and args.pilot_stage is None:
         parser.error("--pilot-stage is required with --pilot-config")
     if args.pilot_config is not None and args.stage is not None:
@@ -246,7 +337,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     pilot = load_pilot_config(args.pilot_config) if args.pilot_config else None
-    if pilot is None:
+    conflict_fix = (
+        load_conflict_fix_config(args.conflict_fix_config)
+        if args.conflict_fix_config
+        else None
+    )
+    phase_plan = (
+        resolve_conflict_fix_phase(
+            conflict_fix,
+            args.conflict_fix_phase,
+            init_checkpoint=args.init_checkpoint,
+            resume=args.resume,
+            audit_decision=args.audit_decision,
+        )
+        if conflict_fix is not None
+        else None
+    )
+    if phase_plan is not None:
+        runtime = load_production_runtime(phase_plan.experiment)
+        stage = phase_plan.stage
+        target_steps = phase_plan.target_step
+        stage_output_root = phase_plan.output_root
+    elif pilot is None:
         runtime = load_production_runtime(args.config)
         stage = args.stage or runtime.config.stage
         target_steps = args.steps or runtime.config.training.total_steps
@@ -268,12 +380,22 @@ def main(argv: list[str] | None = None) -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("production training requires CUDA")
     context = _initialize_distributed_context()
+    if conflict_fix is not None and context.world_size != len(
+        conflict_fix.gpu_indices
+    ):
+        raise RuntimeError("conflict-fix phases require exactly four ranks")
     device = context.device
     torch.manual_seed(runtime.config.seed)
     torch.cuda.manual_seed_all(runtime.config.seed)
     policy = assemble_runtime_policy(runtime, device=device)
     mixer = _build_mixer(runtime, context, split="train")
     training = runtime.config.training
+    gradient_mode = phase_plan.gradient_mode if phase_plan else "ordinary"
+    protected_lr_multiplier = (
+        1.0
+        if phase_plan is None or phase_plan.phase == "world_pretrain"
+        else conflict_fix.protected_lr_multiplier
+    )
     trainer = Trainer(
         policy,
         TrainerConfig(
@@ -285,6 +407,13 @@ def main(argv: list[str] | None = None) -> None:
             total_steps=training.total_steps,
             bf16=training.bf16,
             ddp=context.world_size > 1,
+            stage=stage,
+            protected_lr_multiplier=protected_lr_multiplier,
+            gradient_mode=gradient_mode,
+            gradient_diagnostic_interval=(
+                conflict_fix.conflict_log_interval if conflict_fix else 10
+            ),
+            pcgrad_seed=runtime.config.seed,
         ),
         rank=context.rank,
         distributed_context=context,
@@ -294,7 +423,7 @@ def main(argv: list[str] | None = None) -> None:
     start_global_step = 0
     if args.resume is not None:
         resume_path = args.resume.resolve(strict=True)
-        if pilot is not None or context.world_size > 1:
+        if pilot is not None or phase_plan is not None or context.world_size > 1:
             resume = load_distributed_checkpoint_strict(
                 resume_path,
                 ExpectedCheckpointContract.from_state(state),
@@ -308,7 +437,7 @@ def main(argv: list[str] | None = None) -> None:
         start_global_step = resume.global_step
     elif args.init_checkpoint is not None:
         init_path = args.init_checkpoint.resolve(strict=True)
-        if pilot is not None and context.world_size > 1:
+        if (pilot is not None or phase_plan is not None) and context.world_size > 1:
             load_distributed_policy_checkpoint_strict(
                 init_path,
                 expected_policy_checkpoint_contract(runtime, policy),
@@ -322,7 +451,14 @@ def main(argv: list[str] | None = None) -> None:
         policy.restore_ema_step(-1)
 
     controller = None
-    if pilot is not None:
+    wandb_tracker = None
+    managed_run = pilot is not None or phase_plan is not None
+    if managed_run:
+        validation_batches_per_rank = (
+            pilot.validation_batches_per_rank
+            if pilot is not None
+            else conflict_fix.validation_batches_per_rank
+        )
         validation_mixer = _build_mixer(
             runtime,
             context,
@@ -335,12 +471,12 @@ def main(argv: list[str] | None = None) -> None:
             validation_mixer=validation_mixer,
             context=context,
             config=ValidationConfig(
-                batches_per_rank=pilot.validation_batches_per_rank,
+                batches_per_rank=validation_batches_per_rank,
                 generator_seed=runtime.config.seed + 400,
             ),
         )
 
-        def save_pilot_checkpoint(step: int) -> None:
+        def save_pilot_checkpoint(step: int) -> dict[str, object]:
             destination = stage_output_root / "checkpoints" / f"{stage}-{step:06d}"
             checkpoint_state = _checkpoint_state(
                 runtime,
@@ -357,17 +493,130 @@ def main(argv: list[str] | None = None) -> None:
                 save_checkpoint_atomic(destination, checkpoint_state)
             if context.rank == 0:
                 print(f"checkpoint={destination.resolve()}")
+            manifest = destination / "manifest.json"
+            if manifest.is_symlink() or not manifest.is_file():
+                raise RuntimeError("published checkpoint manifest is unavailable")
+            return {
+                "checkpoint_manifest_sha256": hashlib.sha256(
+                    manifest.read_bytes()
+                ).hexdigest()
+            }
+
+        def observe_validation(record) -> None:
+            if wandb_tracker is None:
+                return
+            wandb_tracker.log_validation(
+                {
+                    f"validation/{name}": value
+                    for name, value in record.metrics.items()
+                },
+                optimizer_step=record.global_step,
+            )
+
+        stop_monitor = None
+        stop_report_context = None
+        if phase_plan is not None and phase_plan.phase in {
+            "unified_gate",
+            "unified_continue",
+        }:
+            world_record = _read_validation_record(
+                conflict_fix.output_root
+                / "world_pretrain/validation/world_pretrain-005000.json"
+            )
+            stop_monitor = ValidationStopMonitor(
+                world_dynamics_loss=world_record.metrics["dynamics_loss"]
+            )
+            if phase_plan.phase == "unified_continue":
+                validation_directory = (
+                    conflict_fix.output_root / "unified/validation"
+                )
+                if (
+                    validation_directory.is_symlink()
+                    or not validation_directory.is_dir()
+                ):
+                    raise ValueError(
+                        "unified continuation validation history is unavailable"
+                    )
+                history_paths = tuple(
+                    sorted(validation_directory.glob("unified-*.json"))
+                )
+                if (
+                    not history_paths
+                    or history_paths[-1].name != "unified-005000.json"
+                ):
+                    raise ValueError(
+                        "unified continuation validation history is incomplete"
+                    )
+                for path in history_paths:
+                    decision = stop_monitor.observe(
+                        _read_validation_record(path)
+                    )
+                    if decision.should_stop:
+                        raise ValueError(
+                            "validation history contains an automatic stop"
+                        )
+            stop_report_context = {
+                "resolved_config": _json_safe(conflict_fix),
+                "git_commit": _git_commit(),
+                "data_spec_hashes": {
+                    **{
+                        f"dataset:{spec.dataset_id}": spec.content_hash
+                        for spec in runtime.dataset_specs
+                    },
+                    **{
+                        f"action:{spec.spec_id}": spec.content_hash
+                        for spec in runtime.action_specs
+                    },
+                },
+            }
 
         controller = PilotController(
             stage=stage,
-            checkpoint_interval=pilot.checkpoint_interval,
-            validation_interval=pilot.validation_interval,
+            checkpoint_interval=(
+                pilot.checkpoint_interval
+                if pilot is not None
+                else conflict_fix.checkpoint_interval
+            ),
+            validation_interval=(
+                pilot.validation_interval
+                if pilot is not None
+                else conflict_fix.validation_interval
+            ),
             output_root=stage_output_root,
             rank=context.rank,
             world_size=context.world_size,
             validate=lambda step: validation_runner.evaluate(stage, step),
             save_checkpoint=save_pilot_checkpoint,
+            stop_monitor=stop_monitor,
+            stop_report_context=stop_report_context,
+            resume_existing_output=(
+                phase_plan.resume_existing_output if phase_plan else False
+            ),
+            save_final_checkpoint=(
+                phase_plan.save_final_checkpoint if phase_plan else True
+            ),
+            validation_observer=observe_validation,
         )
+        if phase_plan is not None:
+            tracking_config = {
+                "pilot": _json_safe(conflict_fix),
+                "experiment": _json_safe(runtime.config),
+                "phase": phase_plan.phase,
+                "gradient_mode": phase_plan.gradient_mode,
+                "audit_decision_sha256": phase_plan.audit_decision_sha256,
+            }
+            tracker_factory = (
+                WandbTracker.resume
+                if phase_plan.start_mode == "resume"
+                else WandbTracker.start
+            )
+            wandb_tracker = tracker_factory(
+                config=conflict_fix.tracking,
+                rank=context.rank,
+                output_root=stage_output_root,
+                job_type=phase_plan.job_type,
+                sanitized_run_config=tracking_config,
+            )
         if args.initialize_only:
             controller.save_initial()
             final_step = 0
@@ -375,8 +624,17 @@ def main(argv: list[str] | None = None) -> None:
             if start_global_step > target_steps:
                 raise ValueError("resume step exceeds pilot stage target")
             final_step = target_steps
-            if start_global_step == 0:
+            if start_global_step == 0 and (
+                phase_plan is None
+                or phase_plan.phase != "gradient_audit"
+            ):
                 controller.save_initial()
+            if phase_plan is not None and start_global_step == 0:
+                wandb_tracker.log(
+                    {"phase/initialized": 1.0},
+                    optimizer_step=0,
+                )
+                controller.validate_initial()
     elif args.initialize_only:
         final_step = 0
     else:
@@ -396,6 +654,7 @@ def main(argv: list[str] | None = None) -> None:
             metric_logger=logger,
             flow_generator=flow_generator,
             optimizer_step_callback=(controller.on_optimizer_step if controller else None),
+            wandb_tracker=wandb_tracker,
         )
     if controller is not None:
         controller.finish(final_step)
@@ -412,8 +671,67 @@ def main(argv: list[str] | None = None) -> None:
         )
         save_checkpoint_atomic(destination.resolve(), final_state)
         print(f"checkpoint={destination.resolve()}")
+    if wandb_tracker is not None:
+        wandb_tracker.finish(sync_complete=True)
     if dist.is_available() and dist.is_initialized():
         dist.destroy_process_group()
+
+
+def _read_validation_record(path: Path) -> ValidationRecord:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("required validation record must be a physical file")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("required validation record is unreadable") from error
+    expected = {
+        "global_step",
+        "stage",
+        "world_size",
+        "batches_per_rank",
+        "samples",
+        "metrics",
+    }
+    if not isinstance(value, dict) or set(value) != expected:
+        raise ValueError("validation record fields do not match contract")
+    try:
+        return ValidationRecord(**value)
+    except TypeError as error:
+        raise ValueError("validation record values do not match contract") from error
+
+
+def _json_safe(value: object) -> object:
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: _json_safe(getattr(value, field.name))
+            for field in fields(value)
+        }
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise ValueError("resolved config mapping keys must be strings")
+        return {key: _json_safe(value[key]) for key in sorted(value)}
+    if isinstance(value, (tuple, list)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    raise ValueError(f"resolved config contains unsupported value {type(value)!r}")
+
+
+def _git_commit() -> str:
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if (
+        len(commit) != 40
+        or any(character not in "0123456789abcdef" for character in commit)
+    ):
+        raise ValueError("Git commit is not a full SHA-1")
+    return commit
 
 
 def _initialize_distributed_context() -> DistributedContext:

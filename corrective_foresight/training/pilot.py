@@ -19,6 +19,7 @@ from corrective_foresight.training.validation import ValidationRecord
 
 ValidationCallback = Callable[[int], ValidationRecord]
 CheckpointCallback = Callable[[int], Mapping[str, object] | None]
+ValidationObserver = Callable[[ValidationRecord], None]
 _STOP_REPORT_CONTEXT_FIELDS = {
     "resolved_config",
     "git_commit",
@@ -40,6 +41,9 @@ class PilotController:
         save_checkpoint: CheckpointCallback,
         stop_monitor: ValidationStopMonitor | None = None,
         stop_report_context: Mapping[str, object] | None = None,
+        resume_existing_output: bool = False,
+        save_final_checkpoint: bool = True,
+        validation_observer: ValidationObserver | None = None,
     ) -> None:
         self.stage = TrainingStage.parse(stage)
         if type(checkpoint_interval) is not int or checkpoint_interval <= 0:
@@ -52,6 +56,8 @@ class PilotController:
             raise ValueError("world_size/rank are invalid")
         if not callable(validate) or not callable(save_checkpoint):
             raise ValueError("pilot callbacks must be callable")
+        if validation_observer is not None and not callable(validation_observer):
+            raise ValueError("validation_observer must be callable")
         if stop_monitor is not None and not isinstance(
             stop_monitor,
             ValidationStopMonitor,
@@ -68,6 +74,11 @@ class PilotController:
             self._validate_stop_report_context(stop_report_context)
         if stop_monitor is None and stop_report_context is not None:
             raise ValueError("stop_report_context requires stop_monitor")
+        if (
+            type(resume_existing_output) is not bool
+            or type(save_final_checkpoint) is not bool
+        ):
+            raise ValueError("pilot output mode flags must be bool")
         root = Path(output_root)
         if not root.is_absolute():
             raise ValueError("pilot output_root must be absolute")
@@ -79,10 +90,18 @@ class PilotController:
         setup = {"error": None}
         if rank == 0:
             try:
-                if root.exists() or root.is_symlink():
-                    raise FileExistsError(f"pilot output_root already exists: {root}")
-                root.parent.mkdir(parents=True, exist_ok=True)
-                root.mkdir()
+                if resume_existing_output:
+                    if root.is_symlink() or not root.is_dir():
+                        raise FileNotFoundError(
+                            f"pilot resume output_root is unavailable: {root}"
+                        )
+                else:
+                    if root.exists() or root.is_symlink():
+                        raise FileExistsError(
+                            f"pilot output_root already exists: {root}"
+                        )
+                    root.parent.mkdir(parents=True, exist_ok=True)
+                    root.mkdir()
             except Exception as error:
                 setup["error"] = repr(error)
         if world_size > 1:
@@ -102,6 +121,9 @@ class PilotController:
         self.save_checkpoint = save_checkpoint
         self.stop_monitor = stop_monitor
         self.stop_report_context = dict(stop_report_context or {})
+        self.resume_existing_output = resume_existing_output
+        self.save_final_checkpoint = save_final_checkpoint
+        self.validation_observer = validation_observer
         self._last_step = 0
         self._checkpoint_steps: set[int] = set()
         self._checkpoint_metadata: dict[int, dict[str, object]] = {}
@@ -119,14 +141,11 @@ class PilotController:
         self._last_step = step
         if step % self.validation_interval == 0:
             record = self.validate(step)
-            if not isinstance(record, ValidationRecord):
-                raise ValueError("pilot validation callback must return ValidationRecord")
-            if record.global_step != step or record.stage != self.stage.value:
-                raise ValueError("pilot validation record does not match current step/stage")
-            if record.world_size != self.world_size:
-                raise ValueError("pilot validation record world_size mismatch")
+            self._validate_record(record, step)
             if self.rank == 0:
                 self._write_validation(record)
+                if self.validation_observer is not None:
+                    self.validation_observer(record)
             if self.stop_monitor is not None:
                 decision = (
                     self.stop_monitor.observe(record)
@@ -164,13 +183,37 @@ class PilotController:
             raise ValueError("pilot final_step must be at least the last optimizer step")
         if final_step == 0:
             return
+        if not self.save_final_checkpoint:
+            return
         if final_step not in self._checkpoint_steps:
             self._save_checkpoint_once(final_step)
 
     def save_initial(self) -> None:
+        if self.resume_existing_output:
+            raise ValueError("resumed pilot cannot save an initial checkpoint")
         if self._last_step != 0:
             raise ValueError("initial pilot checkpoint must be saved before optimizer steps")
         self._save_checkpoint_once(0)
+
+    def validate_initial(self) -> ValidationRecord:
+        if self._last_step != 0:
+            raise ValueError("initial validation must precede optimizer steps")
+        record = self.validate(0)
+        self._validate_record(record, 0)
+        if self.rank == 0:
+            self._write_validation(record)
+            if self.validation_observer is not None:
+                self.validation_observer(record)
+        if self.stop_monitor is not None:
+            decision = (
+                self.stop_monitor.observe(record)
+                if self.rank == 0
+                else PilotStepDecision(False, None)
+            )
+            decision = self._broadcast_decision(decision)
+            if decision.should_stop:
+                raise RuntimeError("stop monitor cannot stop at initial validation")
+        return record
 
     def _save_checkpoint_once(self, step: int) -> Mapping[str, object]:
         if step in self._checkpoint_steps:
@@ -263,3 +306,13 @@ class PilotController:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+
+    def _validate_record(self, record: object, step: int) -> None:
+        if not isinstance(record, ValidationRecord):
+            raise ValueError("pilot validation callback must return ValidationRecord")
+        if record.global_step != step or record.stage != self.stage.value:
+            raise ValueError(
+                "pilot validation record does not match current step/stage"
+            )
+        if record.world_size != self.world_size:
+            raise ValueError("pilot validation record world_size mismatch")

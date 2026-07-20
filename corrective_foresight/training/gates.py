@@ -62,6 +62,54 @@ class AuditDecision:
     dynamics_ratio_threshold: float
     optimizer_steps: tuple[int, ...]
 
+    def __post_init__(self) -> None:
+        if type(self.enable_pcgrad) is not bool:
+            raise ValueError("audit enable_pcgrad must be bool")
+        if (
+            type(self.measurement_count) is not int
+            or self.measurement_count != 25
+            or type(self.conflicting_measurements) is not int
+            or not 0 <= self.conflicting_measurements <= self.measurement_count
+        ):
+            raise ValueError("audit decision counts are invalid")
+        if tuple(self.optimizer_steps) != _AUDIT_STEPS:
+            raise ValueError("audit decision optimizer steps are invalid")
+        expected_fraction = self.conflicting_measurements / self.measurement_count
+        if not math.isclose(
+            self.conflict_fraction,
+            expected_fraction,
+            rel_tol=1e-12,
+            abs_tol=0.0,
+        ):
+            raise ValueError("audit decision conflict fraction is invalid")
+        if self.conflict_threshold != _CONFLICT_THRESHOLD:
+            raise ValueError("audit decision conflict threshold is invalid")
+        world = _positive_finite(
+            self.world_dynamics_loss,
+            "world_dynamics_loss",
+        )
+        audit = _positive_finite(
+            self.audit_dynamics_loss,
+            "audit_dynamics_loss",
+        )
+        expected_ratio = audit / world
+        if (
+            self.dynamics_ratio_threshold != _DYNAMICS_RATIO_THRESHOLD
+            or not math.isclose(
+                self.dynamics_ratio,
+                expected_ratio,
+                rel_tol=1e-12,
+                abs_tol=0.0,
+            )
+        ):
+            raise ValueError("audit decision dynamics ratio is invalid")
+        expected_enable = (
+            self.conflicting_measurements >= 8
+            and self.dynamics_ratio > _DYNAMICS_RATIO_THRESHOLD
+        )
+        if self.enable_pcgrad != expected_enable:
+            raise ValueError("audit decision PCGrad result is inconsistent")
+
 
 @dataclass(frozen=True, slots=True)
 class PilotStepDecision:
@@ -91,6 +139,32 @@ class WorldGateResult:
     target: float
     reason: str
 
+    def __post_init__(self) -> None:
+        expected = {
+            "accepted": (True, False, "target_met"),
+            "marginal": (False, True, "positive_below_target"),
+            "rejected": (False, False, "copy_last_not_improved"),
+        }
+        if self.outcome not in expected:
+            raise ValueError("world gate outcome is invalid")
+        if (
+            (self.accepted, self.requires_approval, self.reason)
+            != expected[self.outcome]
+            or not math.isfinite(self.improvement_vs_copy_last)
+            or not math.isfinite(self.target)
+            or self.target <= 0.0
+        ):
+            raise ValueError("world gate result is inconsistent")
+        derived = (
+            "accepted"
+            if self.improvement_vs_copy_last >= self.target
+            else "marginal"
+            if self.improvement_vs_copy_last > 0.0
+            else "rejected"
+        )
+        if derived != self.outcome:
+            raise ValueError("world gate outcome does not match improvement")
+
 
 @dataclass(frozen=True, slots=True)
 class UnifiedGateResult:
@@ -100,6 +174,29 @@ class UnifiedGateResult:
     median_reward_change: float
     final_improvement_vs_copy_last: float
     dynamics_ratio: float
+
+    def __post_init__(self) -> None:
+        if type(self.passed) is not bool or self.passed != (not self.reasons):
+            raise ValueError("unified gate pass state and reasons disagree")
+        if (
+            not isinstance(self.reasons, tuple)
+            or len(set(self.reasons)) != len(self.reasons)
+            or any(not isinstance(reason, str) or not reason for reason in self.reasons)
+        ):
+            raise ValueError("unified gate reasons are invalid")
+        if type(self.success_gain) is not int or not -10 <= self.success_gain <= 10:
+            raise ValueError("unified gate success gain is invalid")
+        if any(
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(float(value))
+            for value in (
+                self.median_reward_change,
+                self.final_improvement_vs_copy_last,
+                self.dynamics_ratio,
+            )
+        ) or self.dynamics_ratio <= 0.0:
+            raise ValueError("unified gate metrics are invalid")
 
 
 def decide_gradient_audit(
@@ -347,6 +444,21 @@ def write_audit_decision(path: str | Path, decision: AuditDecision) -> None:
     _write_atomic_json(path, asdict(decision))
 
 
+def read_audit_decision(path: str | Path) -> AuditDecision:
+    value = _read_json_report(path)
+    expected = set(AuditDecision.__dataclass_fields__)
+    if set(value) != expected:
+        raise ValueError("audit decision fields do not match contract")
+    steps = value["optimizer_steps"]
+    if not isinstance(steps, list):
+        raise ValueError("audit decision optimizer_steps must be a list")
+    value["optimizer_steps"] = tuple(steps)
+    try:
+        return AuditDecision(**value)
+    except TypeError as error:
+        raise ValueError("audit decision values do not match contract") from error
+
+
 def write_stop_report(
     path: str | Path,
     decision: PilotStepDecision,
@@ -399,10 +511,36 @@ def write_world_gate_report(path: str | Path, result: WorldGateResult) -> None:
     _write_atomic_json(path, asdict(result))
 
 
+def read_world_gate_report(path: str | Path) -> WorldGateResult:
+    value = _read_json_report(path)
+    expected = set(WorldGateResult.__dataclass_fields__)
+    if set(value) != expected:
+        raise ValueError("world gate fields do not match contract")
+    try:
+        return WorldGateResult(**value)
+    except TypeError as error:
+        raise ValueError("world gate values do not match contract") from error
+
+
 def write_unified_gate_report(path: str | Path, result: UnifiedGateResult) -> None:
     if not isinstance(result, UnifiedGateResult):
         raise ValueError("unified gate writer requires UnifiedGateResult")
     _write_atomic_json(path, asdict(result))
+
+
+def read_unified_gate_report(path: str | Path) -> UnifiedGateResult:
+    value = _read_json_report(path)
+    expected = set(UnifiedGateResult.__dataclass_fields__)
+    if set(value) != expected:
+        raise ValueError("unified gate fields do not match contract")
+    reasons = value["reasons"]
+    if not isinstance(reasons, list):
+        raise ValueError("unified gate reasons must be a list")
+    value["reasons"] = tuple(reasons)
+    try:
+        return UnifiedGateResult(**value)
+    except TypeError as error:
+        raise ValueError("unified gate values do not match contract") from error
 
 
 def _write_atomic_json(path: str | Path, payload: Mapping[str, object]) -> None:
@@ -429,6 +567,19 @@ def _write_atomic_json(path: str | Path, payload: Mapping[str, object]) -> None:
     finally:
         if temporary.exists() and not temporary.is_symlink():
             temporary.unlink()
+
+
+def _read_json_report(path: str | Path) -> dict[str, object]:
+    source = Path(path)
+    if source.is_symlink() or not source.is_file():
+        raise ValueError("gate report must be a physical file")
+    try:
+        value = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("gate report is unreadable") from error
+    if not isinstance(value, dict):
+        raise ValueError("gate report root must be a mapping")
+    return value
 
 
 def _positive_finite(value: object, name: str) -> float:

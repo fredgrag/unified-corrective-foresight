@@ -207,6 +207,29 @@ class PilotControllerTest(unittest.TestCase):
         self.assertEqual(callback_steps, [1, 2])
         self.assertEqual(policy.last_ema_step, 1)
 
+    def test_resume_existing_output_can_skip_final_audit_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "audit"
+            root.mkdir()
+            checkpoints: list[int] = []
+            controller = PilotController(
+                stage="unified",
+                checkpoint_interval=1000,
+                validation_interval=250,
+                output_root=root,
+                rank=0,
+                world_size=1,
+                validate=_stop_record,
+                save_checkpoint=lambda step: checkpoints.append(step),
+                resume_existing_output=True,
+                save_final_checkpoint=False,
+            )
+
+            controller.on_optimizer_step(1)
+            controller.finish(500)
+
+            self.assertEqual(checkpoints, [])
+
 
 if __name__ == "__main__":
     unittest.main()
