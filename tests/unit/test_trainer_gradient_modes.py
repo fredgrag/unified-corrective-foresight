@@ -69,7 +69,7 @@ class TrainerGradientModesTest(unittest.TestCase):
             5e-5,
         )
 
-    def test_zero_protected_lr_freezes_world_and_ema_but_updates_action(self) -> None:
+    def test_zero_protected_lr_freezes_world_and_advances_ema_step(self) -> None:
         trainer = make_mode_trainer(
             gradient_mode="pcgrad",
             protected_lr_multiplier=0.0,
@@ -86,8 +86,6 @@ class TrainerGradientModesTest(unittest.TestCase):
             name: value.detach().clone()
             for name, value in trainer.policy.ema_state_target.state_dict().items()
         }
-        ema_step_before = trainer.policy.last_ema_step
-
         result = run_optimizer_steps(trainer, 1)[0]
 
         self.assertEqual(result.learning_rates["protected"], 0.0)
@@ -114,7 +112,7 @@ class TrainerGradientModesTest(unittest.TestCase):
                 rtol=0.0,
                 atol=0.0,
             )
-        self.assertEqual(trainer.policy.last_ema_step, ema_step_before)
+        self.assertEqual(trainer.policy.last_ema_step, 0)
 
     def test_audit_logs_only_on_tenth_optimizer_step(self) -> None:
         trainer = make_mode_trainer(

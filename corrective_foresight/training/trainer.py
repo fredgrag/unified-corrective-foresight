@@ -340,8 +340,10 @@ class Trainer:
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.scheduler.step()
-            if self.config.protected_lr_multiplier > 0.0:
-                self.policy.update_ema(global_step)
+            self.policy.update_ema(
+                global_step,
+                update_target=self.config.protected_lr_multiplier > 0.0,
+            )
         except Exception:
             if self._gradient_accumulator is not None:
                 self._gradient_accumulator.reset()

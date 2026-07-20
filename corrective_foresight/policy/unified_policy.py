@@ -306,10 +306,13 @@ class UnifiedCorrectiveForesightPolicy(nn.Module):
             self.train(was_training)
 
     @torch.no_grad()
-    def update_ema(self, global_step: int) -> None:
+    def update_ema(self, global_step: int, *, update_target: bool = True) -> None:
         if type(global_step) is not int or global_step <= self._last_ema_step:
             raise ValueError("EMA global_step must be strictly increasing")
-        self.ema_state_target.update()
+        if type(update_target) is not bool:
+            raise ValueError("EMA update_target must be bool")
+        if update_target:
+            self.ema_state_target.update()
         self._last_ema_step = global_step
 
     def restore_ema_step(self, value: int) -> None:
